@@ -1,0 +1,84 @@
+torchrun \
+  --standalone \
+  --nnodes 1 \
+  --nproc-per-node 8 \
+  vla-scripts/finetune.py \
+  --vla_path "path/to/openvla-7b-oft-finetuned-libero-10" \
+  --data_root_dir path/to/libero/datasets \
+  --dataset_name libero_10_no_noops \
+  --use_l1_regression True \
+  --use_diffusion False \
+  --use_film False \
+  --num_images_in_input 2 \
+  --use_proprio True \
+  --batch_size 8 \
+  --learning_rate 5e-4 \
+  --num_steps_before_decay 30000 \
+  --max_steps 40005 \
+  --save_freq 10000 \
+  --save_latest_checkpoint_only False \
+  --image_aug True \
+  --lora_rank 32
+torchrun \
+  --standalone \
+  --nnodes 1 \
+  --nproc-per-node 8 \
+  vla-scripts/finetune.py \
+  --vla_path "path/to/openvla-7b-oft-finetuned-libero-object" \
+  --data_root_dir path/to/libero/datasets \
+  --dataset_name libero_object_no_noops \
+  --use_l1_regression True \
+  --use_diffusion False \
+  --use_film False \
+  --num_images_in_input 2 \
+  --use_proprio True \
+  --batch_size 8 \
+  --learning_rate 5e-4 \
+  --num_steps_before_decay 30000 \
+  --max_steps 40005 \
+  --save_freq 10000 \
+  --save_latest_checkpoint_only False \
+  --image_aug True \
+  --lora_rank 32
+torchrun \
+  --standalone \
+  --nnodes 1 \
+  --nproc-per-node 8 \
+  vla-scripts/finetune.py \
+  --vla_path "path/to/openvla-7b-oft-finetuned-libero-spatial" \
+  --data_root_dir path/to/libero/datasets \
+  --dataset_name libero_spatial_no_noops \
+  --use_l1_regression True \
+  --use_diffusion False \
+  --use_film False \
+  --num_images_in_input 2 \
+  --use_proprio True \
+  --batch_size 8 \
+  --learning_rate 5e-4 \
+  --num_steps_before_decay 30000 \
+  --max_steps 40005 \
+  --save_freq 10000 \
+  --save_latest_checkpoint_only False \
+  --image_aug True \
+  --lora_rank 32
+torchrun \
+  --standalone \
+  --nnodes 1 \
+  --nproc-per-node 8 \
+  vla-scripts/finetune.py \
+  --vla_path "path/to/openvla-7b-oft-finetuned-libero-goal" \
+  --data_root_dir path/to/libero/datasets \
+  --dataset_name libero_goal_no_noops \
+  --use_l1_regression True \
+  --use_diffusion False \
+  --use_film False \
+  --num_images_in_input 2 \
+  --use_proprio True \
+  --batch_size 8 \
+  --learning_rate 5e-4 \
+  --num_steps_before_decay 30000 \
+  --max_steps 40005 \
+  --save_freq 10000 \
+  --save_latest_checkpoint_only False \
+  --image_aug True \
+  --lora_rank 32
