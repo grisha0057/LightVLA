@@ -12,7 +12,7 @@ conda activate openvla-oft
 pip3 install torch torchvision torchaudio
 
 # Clone openvla-oft repo and pip install to download dependencies
-git clone https://github.com/moojink/openvla-oft.git
-cd openvla-oft
+git clone https://github.com/LiAutoAD/LightVLA.git
+cd LightVLA
 pip install -e .
 ```
