@@ -57,6 +57,19 @@ class TokenPruner(nn.Module):
         self.noise_scale = None
         self.scale_factor = 1 / math.sqrt(config.hidden_size)
 
+        # === Pruning configuration ===
+        self.selection_strategy = getattr(config, "prune_selection_strategy", "coverage")
+        self.coverage_temperature = getattr(config, "prune_temperature", 0.1)
+        self.coverage_target = getattr(config, "prune_target_coverage", 0.9)
+        self.min_keep = getattr(config, "prune_min_keep", 64)
+        self.max_keep = getattr(config, "prune_max_keep", None)
+        keep_bins = getattr(config, "prune_keep_bins", (64, 96, 128, 160, 192))
+        self.keep_bins = tuple(keep_bins) if keep_bins is not None else None
+        self.top_k = getattr(config, "prune_top_k", None)
+
+        # Numerical helpers
+        self._coverage_eps = 1e-6
+
     def set_noise_scale(self, noise_scale):
         self.noise_scale = noise_scale
 
@@ -67,28 +80,99 @@ class TokenPruner(nn.Module):
         hidden_states = hidden_states * torch.rsqrt(variance + eps)
         return hidden_states.to(input_dtype)
 
-    def get_score(self, patches, prompts):
+    def get_score(
+        self,
+        patches,
+        prompts,
+        q_proj_weight,
+        q_proj_bias,
+        k_proj_weight,
+        k_proj_bias,
+        num_heads,
+        prompt_mask=None,
+    ):
         patches = self.rms_norm(patches)
         prompts = self.rms_norm(prompts)
 
-        queries = F.scaled_dot_product_attention(patches, prompts, prompts)
-        queries = self.rms_norm(queries)
-        score = queries @ patches.transpose(-2, -1) * self.scale_factor
+        # Project into the first-layer attention space (reuse LLM Q/K weights)
+        queries = F.linear(patches, q_proj_weight, q_proj_bias)
+        keys = F.linear(prompts, k_proj_weight, k_proj_bias)
+
+        bsz, num_patches, _ = queries.shape
+        _, num_tokens, _ = keys.shape
+
+        head_dim = queries.shape[-1] // num_heads
+        queries = queries.view(bsz, num_patches, num_heads, head_dim).permute(0, 2, 1, 3)
+        keys = keys.view(bsz, num_tokens, num_heads, head_dim).permute(0, 2, 1, 3)
+
+        attn_logits = torch.matmul(queries, keys.transpose(-1, -2)) / math.sqrt(head_dim)
+
+        if prompt_mask is not None:
+            prompt_mask = prompt_mask.bool()
+            expanded_mask = prompt_mask.unsqueeze(1).unsqueeze(2)
+            attn_logits = attn_logits.masked_fill(~expanded_mask, float("-inf"))
+
+        # Aggregate signal across tokens and heads
+        token_scores = attn_logits.max(dim=-1).values  # (B, H, P)
+        score = token_scores.mean(dim=1)  # (B, P)
+
+        score = torch.where(torch.isfinite(score), score, torch.zeros_like(score))
 
         return score
 
+    def _budgeted_keep_counts(self, score):
+        device = score.device
+        bsz, num_patches = score.shape
+
+        # Fallback: fixed Top-K when requested
+        if self.selection_strategy == "topk" and self.top_k is not None:
+            k = min(self.top_k, num_patches)
+            keep_counts = torch.full((bsz,), k, device=device, dtype=torch.int64)
+            sorted_indices = score.argsort(dim=-1, descending=True)
+            return keep_counts, sorted_indices
+
+        temperature = max(float(self.coverage_temperature), self._coverage_eps)
+        probs = torch.softmax(score / temperature, dim=-1)
+        sorted_probs, sorted_indices = probs.sort(dim=-1, descending=True)
+        cumulative = torch.cumsum(sorted_probs, dim=-1)
+
+        target = float(self.coverage_target)
+        keep_counts = (cumulative < target).sum(dim=-1) + 1
+
+        if self.min_keep is not None:
+            keep_counts = torch.maximum(
+                keep_counts,
+                torch.full_like(keep_counts, min(self.min_keep, num_patches)),
+            )
+
+        if self.max_keep is not None:
+            keep_counts = torch.minimum(
+                keep_counts,
+                torch.full_like(keep_counts, min(self.max_keep, num_patches)),
+            )
+
+        keep_counts = torch.clamp(keep_counts, min=1, max=num_patches)
+
+        if self.keep_bins:
+            valid_bins = [min(num_patches, int(bin_val)) for bin_val in self.keep_bins if bin_val > 0]
+            if valid_bins:
+                bins = torch.tensor(sorted(set(valid_bins)), device=device, dtype=torch.int64)
+                search_idx = torch.searchsorted(bins, keep_counts, right=False)
+                search_idx = torch.clamp(search_idx, max=bins.numel() - 1)
+                keep_counts = bins[search_idx]
+
+        return keep_counts, sorted_indices
+
     def score_to_mask(self, score):
-        bsz = score.shape[0]
+        bsz, num_patches = score.shape
+        mask = torch.zeros(bsz, num_patches, dtype=torch.bool, device=score.device)
 
-        mask = torch.zeros(bsz, self.num_patches, dtype=torch.bool, device=score.device)
+        keep_counts, sorted_indices = self._budgeted_keep_counts(score)
 
-        indices = score.argmax(-1)
-        batch_indices = torch.arange(bsz, device=score.device).unsqueeze(1).expand_as(indices)
-
-        mask[batch_indices, indices] = True
-
-        rand_mask = torch.rand(bsz, self.num_patches, device=score.device) > 0.9
-        mask[rand_mask] = False
+        for batch_idx in range(bsz):
+            k = int(keep_counts[batch_idx].item())
+            topk_indices = sorted_indices[batch_idx, :k]
+            mask[batch_idx, topk_indices] = True
 
         return mask
 
@@ -100,7 +184,17 @@ class TokenPruner(nn.Module):
         score = hard_score + soft_score - soft_score.detach()
         return score.argmax(dim=-1), score @ patches
 
-    def forward(self, tokens, position_ids, attention_mask):
+    def forward(
+        self,
+        tokens,
+        position_ids,
+        attention_mask,
+        q_proj_weight,
+        q_proj_bias,
+        k_proj_weight,
+        k_proj_bias,
+        num_heads,
+    ):
         bsz, seq_len, dim = tokens.shape
         cls_token, patches, task = torch.split(tokens, [1, self.num_patches, seq_len-self.num_patches-1], dim=1)
         cls_token_id, patches_id, task_id = torch.split(position_ids, [1, self.num_patches, seq_len-self.num_patches-1], dim=1)
@@ -108,7 +202,16 @@ class TokenPruner(nn.Module):
             cls_token_mask, patches_mask, task_mask = torch.split(attention_mask, [1, self.num_patches, seq_len-self.num_patches-1], dim=1)
 
         # task_score = self.get_task_score(attns)
-        score = self.get_score(patches, task)
+        score = self.get_score(
+            patches,
+            task,
+            q_proj_weight,
+            q_proj_bias,
+            k_proj_weight,
+            k_proj_bias,
+            num_heads,
+            prompt_mask=task_mask if attention_mask is not None else None,
+        )
 
         if not self.training:
             mask = self.score_to_mask(score)
@@ -198,7 +301,17 @@ class PrunedLlamaModel(LlamaModel):
 
         position_ids = cache_position.unsqueeze(0).expand(hidden_states.shape[0], -1)
 
-        hidden_states, position_ids, attention_mask = self.pruner(hidden_states, position_ids, attention_mask)
+        first_layer_attn = self.layers[0].self_attn
+        hidden_states, position_ids, attention_mask = self.pruner(
+            hidden_states,
+            position_ids,
+            attention_mask,
+            first_layer_attn.q_proj.weight,
+            first_layer_attn.q_proj.bias,
+            first_layer_attn.k_proj.weight,
+            first_layer_attn.k_proj.bias,
+            first_layer_attn.num_heads,
+        )
 
         past_seen_tokens = 0
 
