@@ -206,3 +206,6 @@ runs/
 config_local.json
 config_private.json
 .secrets
+
+checkpoints/
+datasets/
