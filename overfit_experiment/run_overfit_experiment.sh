@@ -4,6 +4,7 @@
 # 验证新的视觉 token 筛选逻辑能否顺利训练
 
 set -e
+set -o pipefail
 
 # 实验配置
 VLA_PATH="/root/workspace/LightVLA/checkpoints/openvla-libero-spatial"
@@ -40,19 +41,79 @@ echo "✅ 检查通过，开始训练..."
 # 启动 overfit 训练
 cd /root/workspace/LightVLA
 
-# 设置多 GPU 环境变量
-export CUDA_VISIBLE_DEVICES=0,1
-export NCCL_SOCKET_IFNAME=lo
-export NCCL_IB_DISABLE=1
-export NCCL_P2P_DISABLE=1
-export MASTER_ADDR=127.0.0.1
-export MASTER_PORT=12355
+# 修复容器主机名解析问题：若 hostname 无法在 /etc/hosts 中解析，会导致 c10d 反复失败
+HN=$(hostname)
+if ! grep -q "\b${HN}\b" /etc/hosts 2>/dev/null; then
+  echo "🧩 /etc/hosts 未包含主机名 ${HN}，尝试写入 127.0.0.1 映射以避免分布式初始化出错。"
+  {
+    echo "127.0.0.1 ${HN}"
+  } >> /etc/hosts 2>/dev/null || echo "⚠️ 无法写入 /etc/hosts（可能缺少权限），请手动添加: '127.0.0.1 ${HN}'"
+fi
 
-torchrun \
-  --standalone \
-  --nnodes 1 \
-  --nproc-per-node 2 \
-  vla-scripts/finetune.py \
+# 分布式/网络环境变量（IPv4-only，loopback）
+if [ -z "${MASTER_ADDR:-}" ]; then
+  if [ "${IFACE}" != "lo" ] && command -v ip >/dev/null 2>&1; then
+    IP4=$(ip -4 addr show dev "${IFACE}" | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1)
+    export MASTER_ADDR=${IP4:-127.0.0.1}
+  else
+    export MASTER_ADDR=127.0.0.1
+  fi
+fi
+export MASTER_PORT=${MASTER_PORT:-12355}
+# 可通过 OVERFIT_IFACE=eth0 指定网卡，默认回环 lo
+IFACE=${OVERFIT_IFACE:-lo}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-${IFACE}}
+export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
+export NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY:-AF_INET}
+export NCCL_ASYNC_ERROR_HANDLING=${NCCL_ASYNC_ERROR_HANDLING:-1}
+export NCCL_BLOCKING_WAIT=${NCCL_BLOCKING_WAIT:-1}
+export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-lo}
+export GLOO_DISABLE_IPV6=${GLOO_DISABLE_IPV6:-1}
+export GLOO_DEVICE_TRANSPORT=${GLOO_DEVICE_TRANSPORT:-TCP}
+export TORCH_DISTRIBUTED_DEBUG=${TORCH_DISTRIBUTED_DEBUG:-DETAIL}
+export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+
+# GPU 进程数控制：设置 OVERFIT_SINGLE_GPU=1 可单卡调试
+if [ "${OVERFIT_SINGLE_GPU:-0}" = "1" ]; then
+  export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+  NPROC=1
+else
+  export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
+  NPROC=2
+fi
+
+LOG_FILE=${RUN_ROOT_DIR}/train_$(date +%Y%m%d_%H%M%S).log
+
+if [ "${NPROC}" = "1" ]; then
+  echo "🔧 单卡模式：跳过 torchrun，直接运行 Python 以避免分布式初始化。"
+  stdbuf -oL -eL python -u vla-scripts/finetune.py \
+    --vla_path "${VLA_PATH}" \
+    --data_root_dir "${DATA_ROOT_DIR}" \
+    --dataset_name "${DATASET_NAME}" \
+    --use_l1_regression True \
+    --use_diffusion False \
+    --use_film False \
+    --num_images_in_input 2 \
+    --use_proprio True \
+    --batch_size 1 \
+    --learning_rate 1e-3 \
+    --num_steps_before_decay 100 \
+    --max_steps 500 \
+    --save_freq 50 \
+    --save_latest_checkpoint_only False \
+    --image_aug False \
+    --lora_rank 16 \
+    --run_root_dir "${RUN_ROOT_DIR}" \
+    --shuffle_buffer_size 1000 2>&1 | tee -a ${LOG_FILE}
+else
+  # 多卡模式：恢复 --standalone，减少不必要的名字解析与外部依赖
+  stdbuf -oL -eL torchrun \
+    --standalone \
+    --nnodes 1 \
+    --nproc-per-node ${NPROC} \
+    --max-restarts 0 \
+    vla-scripts/finetune.py \
   --vla_path "${VLA_PATH}" \
   --data_root_dir "${DATA_ROOT_DIR}" \
   --dataset_name "${DATASET_NAME}" \
@@ -61,7 +122,7 @@ torchrun \
   --use_film False \
   --num_images_in_input 2 \
   --use_proprio True \
-  --batch_size 2 \
+  --batch_size 1 \
   --learning_rate 1e-3 \
   --num_steps_before_decay 100 \
   --max_steps 500 \
@@ -70,7 +131,8 @@ torchrun \
   --image_aug False \
   --lora_rank 16 \
   --run_root_dir "${RUN_ROOT_DIR}" \
-  --shuffle_buffer_size 1000
+  --shuffle_buffer_size 1000 2>&1 | tee -a ${LOG_FILE}
+fi
 
 echo "🎉 overfit 实验完成!"
 echo "检查日志和 checkpoint: ${RUN_ROOT_DIR}"

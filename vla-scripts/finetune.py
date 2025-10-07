@@ -814,8 +814,9 @@ def finetune(cfg: FinetuneConfig) -> None:
         update_auto_map(cfg.vla_path)
         check_model_logic_mismatch(cfg.vla_path)
 
-    # Wait for model files to be synced
-    dist.barrier()
+    # Wait for model files to be synced (only if distributed is initialized)
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
 
     # Load processor and VLA
     processor = PrismaticProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
@@ -1106,7 +1107,8 @@ def finetune(cfg: FinetuneConfig) -> None:
                 train_dataset=train_dataset,
             )
 
-        dist.barrier()
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
 
         # Test model on validation set
         if cfg.use_val_set and log_step > 0 and log_step % cfg.val_freq == 0:

@@ -66,6 +66,10 @@ class TokenPruner(nn.Module):
         keep_bins = getattr(config, "prune_keep_bins", (64, 96, 128, 160, 192))
         self.keep_bins = tuple(keep_bins) if keep_bins is not None else None
         self.top_k = getattr(config, "prune_top_k", None)
+        self.debug = getattr(config, "prune_debug", False)
+        self.debug_max_logs = getattr(config, "prune_debug_max_logs", 20)
+        self._debug_counter = 0
+        self._last_keep_counts: Optional[torch.Tensor] = None
 
         # Numerical helpers
         self._coverage_eps = 1e-6
@@ -161,6 +165,9 @@ class TokenPruner(nn.Module):
                 search_idx = torch.clamp(search_idx, max=bins.numel() - 1)
                 keep_counts = bins[search_idx]
 
+        if self.debug:
+            self._last_keep_counts = keep_counts.detach().to("cpu")
+
         return keep_counts, sorted_indices
 
     def score_to_mask(self, score):
@@ -175,14 +182,6 @@ class TokenPruner(nn.Module):
             mask[batch_idx, topk_indices] = True
 
         return mask
-
-    def score_to_indices(self, score, patches):
-        if self.noise_scale is not None:
-            score = score + torch.rand_like(score) * self.noise_scale
-        hard_score = F.one_hot(score.argmax(dim=-1), num_classes=self.num_patches)
-        soft_score = torch.softmax(score, dim=-1)
-        score = hard_score + soft_score - soft_score.detach()
-        return score.argmax(dim=-1), score @ patches
 
     def forward(
         self,
@@ -213,9 +212,20 @@ class TokenPruner(nn.Module):
             prompt_mask=task_mask if attention_mask is not None else None,
         )
 
-        if not self.training:
-            mask = self.score_to_mask(score)
+        mask = self.score_to_mask(score)
 
+        if self.training:
+            soft_weights = torch.softmax(score / max(self.coverage_temperature, self._coverage_eps), dim=-1)
+            selection = mask.float() + soft_weights - soft_weights.detach()
+            patches = patches * selection.unsqueeze(-1)
+
+            tokens = torch.cat([cls_token, patches, task], dim=1)
+            position_ids = torch.cat([cls_token_id, patches_id, task_id], dim=1)
+
+            if attention_mask is not None:
+                attention_mask = torch.cat([cls_token_mask, patches_mask, task_mask], dim=1)
+
+        else:
             patches = patches[mask].view(bsz, -1, dim)
             tokens = torch.cat([cls_token, patches, task], dim=1)
 
@@ -225,19 +235,21 @@ class TokenPruner(nn.Module):
             if attention_mask is not None:
                 patches_mask = patches_mask[mask].view(bsz, -1)
                 attention_mask = torch.cat([cls_token_mask, patches_mask, task_mask], dim=1)
-        
-        else:
-            indices, patches = self.score_to_indices(score, patches)
-            batch_indices = torch.arange(patches.shape[0], device=patches.device).unsqueeze(1).expand_as(indices)
 
-            tokens = torch.cat([cls_token, patches, task], dim=1)
-
-            patches_id = patches_id[batch_indices, indices].view(bsz, -1)
-            position_ids = torch.cat([cls_token_id, patches_id, task_id], dim=1)
-
-            if attention_mask is not None:
-                patches_mask = patches_mask[batch_indices, indices].view(bsz, -1)
-                attention_mask = torch.cat([cls_token_mask, patches_mask, task_mask], dim=1)
+        if self.debug and self._debug_counter < self.debug_max_logs:
+            keep_counts = self._last_keep_counts
+            if keep_counts is not None:
+                keep_counts = keep_counts.to(torch.float32)
+                logger.info(
+                    "TokenPruner debug | keep_counts min=%.0f max=%.0f mean=%.2f | target=%.2f | temp=%.3f | bins=%s",
+                    keep_counts.min().item(),
+                    keep_counts.max().item(),
+                    keep_counts.mean().item(),
+                    float(self.coverage_target),
+                    float(self.coverage_temperature),
+                    self.keep_bins,
+                )
+            self._debug_counter += 1
 
         return tokens, position_ids, attention_mask
 
