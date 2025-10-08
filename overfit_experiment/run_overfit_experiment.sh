@@ -85,6 +85,14 @@ fi
 
 LOG_FILE=${RUN_ROOT_DIR}/train_$(date +%Y%m%d_%H%M%S).log
 
+LR=${OVERFIT_LR:-3e-4}
+MAX_STEPS=${OVERFIT_MAX_STEPS:-1500}
+SAVE_FREQ=${OVERFIT_SAVE_FREQ:-250}
+MILESTONE=${OVERFIT_DECAY_STEP:-500}
+GAMMA=${OVERFIT_DECAY_GAMMA:-0.3}
+WARMUP_STEPS=${OVERFIT_WARMUP_STEPS:-200}
+TARGET_COVERAGE=${OVERFIT_TARGET_COVERAGE:-0.98}
+
 if [ "${NPROC}" = "1" ]; then
   echo "🔧 单卡模式：跳过 torchrun，直接运行 Python 以避免分布式初始化。"
   stdbuf -oL -eL python -u vla-scripts/finetune.py \
@@ -97,15 +105,17 @@ if [ "${NPROC}" = "1" ]; then
     --num_images_in_input 2 \
     --use_proprio True \
     --batch_size 1 \
-    --learning_rate 1e-3 \
-    --num_steps_before_decay 100 \
-    --max_steps 500 \
-    --save_freq 50 \
+    --learning_rate 3e-4 \
+    --grad_accumulation_steps 2 \
+    --num_steps_before_decay 500 \
+    --max_steps 1500 \
+    --save_freq 250 \
     --save_latest_checkpoint_only False \
     --image_aug False \
     --lora_rank 16 \
     --run_root_dir "${RUN_ROOT_DIR}" \
-    --shuffle_buffer_size 1000 2>&1 | tee -a ${LOG_FILE}
+    --shuffle_buffer_size 1000 \
+    --log_freq 20 2>&1 | tee -a ${LOG_FILE}
 else
   # 多卡模式：恢复 --standalone，减少不必要的名字解析与外部依赖
   stdbuf -oL -eL torchrun \
@@ -123,15 +133,17 @@ else
   --num_images_in_input 2 \
   --use_proprio True \
   --batch_size 1 \
-  --learning_rate 1e-3 \
-  --num_steps_before_decay 100 \
-  --max_steps 500 \
-  --save_freq 50 \
+  --learning_rate 3e-4 \
+  --grad_accumulation_steps 2 \
+  --num_steps_before_decay 500 \
+  --max_steps 1500 \
+  --save_freq 250 \
   --save_latest_checkpoint_only False \
   --image_aug False \
   --lora_rank 16 \
   --run_root_dir "${RUN_ROOT_DIR}" \
-  --shuffle_buffer_size 1000 2>&1 | tee -a ${LOG_FILE}
+  --shuffle_buffer_size 1000 \
+  --log_freq 20 2>&1 | tee -a ${LOG_FILE}
 fi
 
 echo "🎉 overfit 实验完成!"
