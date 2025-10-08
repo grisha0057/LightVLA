@@ -1026,8 +1026,8 @@ def train(cfg: TrainingConfig) -> None:
         smoothened_metrics = compute_smoothened_metrics(recent_metrics)
         smoothened_metrics['noise_scale'] = vla.module.language_model.model.pruner.noise_scale
         
-        # Push Metrics to Tensorboard (every tensorboard_log_freq gradient steps)
-        if distributed_state.is_main_process:
+        # Push Metrics to Tensorboard / Print only at gradient accumulation boundaries to avoid duplicates
+        if distributed_state.is_main_process and (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
             if log_step % cfg.tensorboard_log_freq == 0:
                 log_metrics_to_tensorboard(smoothened_metrics, "VLA Train", log_step, writer)
             if log_step % cfg.log_freq == 0:
