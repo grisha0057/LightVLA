@@ -88,10 +88,11 @@ LOG_FILE=${RUN_ROOT_DIR}/train_$(date +%Y%m%d_%H%M%S).log
 LR=${OVERFIT_LR:-3e-4}
 MAX_STEPS=${OVERFIT_MAX_STEPS:-1500}
 SAVE_FREQ=${OVERFIT_SAVE_FREQ:-250}
-MILESTONE=${OVERFIT_DECAY_STEP:-500}
-GAMMA=${OVERFIT_DECAY_GAMMA:-0.3}
+MILESTONES=${OVERFIT_DECAY_MILESTONES:-"500,1000"}
+GAMMA=${OVERFIT_DECAY_GAMMA:-0.5}
 WARMUP_STEPS=${OVERFIT_WARMUP_STEPS:-200}
-TARGET_COVERAGE=${OVERFIT_TARGET_COVERAGE:-0.98}
+COVERAGE_WARMUP=${OVERFIT_COVERAGE_WARMUP:-1.0}
+COVERAGE_TARGET=${OVERFIT_COVERAGE_TARGET:-0.98}
 
 if [ "${NPROC}" = "1" ]; then
   echo "🔧 单卡模式：跳过 torchrun，直接运行 Python 以避免分布式初始化。"
@@ -105,11 +106,15 @@ if [ "${NPROC}" = "1" ]; then
     --num_images_in_input 2 \
     --use_proprio True \
     --batch_size 1 \
-    --learning_rate 3e-4 \
+    --learning_rate ${LR} \
+    --lr_warmup_steps ${WARMUP_STEPS} \
+    --lr_decay_milestones ${MILESTONES} \
+    --lr_decay_gamma ${GAMMA} \
+    --prune_coverage_warmup ${COVERAGE_WARMUP} \
+    --prune_coverage_target ${COVERAGE_TARGET} \
     --grad_accumulation_steps 2 \
-    --num_steps_before_decay 500 \
-    --max_steps 1500 \
-    --save_freq 250 \
+    --max_steps ${MAX_STEPS} \
+    --save_freq ${SAVE_FREQ} \
     --save_latest_checkpoint_only False \
     --image_aug False \
     --lora_rank 16 \
@@ -133,11 +138,15 @@ else
   --num_images_in_input 2 \
   --use_proprio True \
   --batch_size 1 \
-  --learning_rate 3e-4 \
+  --learning_rate ${LR} \
+  --lr_warmup_steps ${WARMUP_STEPS} \
+  --lr_decay_milestones ${MILESTONES} \
+  --lr_decay_gamma ${GAMMA} \
+  --prune_coverage_warmup ${COVERAGE_WARMUP} \
+  --prune_coverage_target ${COVERAGE_TARGET} \
   --grad_accumulation_steps 2 \
-  --num_steps_before_decay 500 \
-  --max_steps 1500 \
-  --save_freq 250 \
+  --max_steps ${MAX_STEPS} \
+  --save_freq ${SAVE_FREQ} \
   --save_latest_checkpoint_only False \
   --image_aug False \
   --lora_rank 16 \

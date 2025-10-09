@@ -88,7 +88,8 @@ class FinetuneConfig:
     batch_size: int = 8                              # Batch size per device (total batch size = batch_size * num GPUs)
     learning_rate: float = 5e-4                      # Learning rate
     lr_warmup_steps: int = 0                         # Number of steps to warm up learning rate (from 10% to 100%)
-    num_steps_before_decay: int = 100_000            # Number of steps before LR decays by 10x
+    lr_decay_milestones: Tuple[int, ...] = (100_000,)  # Milestones at which LR decays (can be multiple)
+    lr_decay_gamma: float = 0.1                      # Multiplicative factor of learning rate decay at each milestone
     grad_accumulation_steps: int = 1                 # Number of gradient accumulation steps
     max_steps: int = 200_000                         # Max number of training steps
     use_val_set: bool = False                        # If True, uses validation set and log validation metrics
@@ -109,6 +110,10 @@ class FinetuneConfig:
     merge_lora_during_training: bool = True          # If True, merges LoRA weights and saves result during training
                                                      #   Note: Merging can be very slow on some machines. If so, set to
                                                      #         False and merge final checkpoint offline!
+
+    # Token Pruning (Coverage Target Scheduling)
+    prune_coverage_warmup: float = 1.0               # Coverage target during warmup (1.0 = no pruning, keep all tokens)
+    prune_coverage_target: float = 0.98              # Final coverage target after warmup
 
     # Logging
     tensorboard_log_dir: str = Path("logs/tensorboard")
@@ -933,8 +938,8 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Create learning rate scheduler
     scheduler = MultiStepLR(
         optimizer,
-        milestones=[cfg.num_steps_before_decay],  # Number of steps after which LR will change
-        gamma=0.1,  # Multiplicative factor of learning rate decay
+        milestones=list(cfg.lr_decay_milestones),  # Milestones at which LR will decay
+        gamma=cfg.lr_decay_gamma,  # Multiplicative factor of learning rate decay at each milestone
     )
 
     # Create Action Tokenizer
@@ -1030,7 +1035,15 @@ def finetune(cfg: FinetuneConfig) -> None:
         gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
         log_step = gradient_step_idx if not cfg.resume else cfg.resume_step + gradient_step_idx
 
+        # Set noise scale (decreases over training)
         vla.module.language_model.model.pruner.set_noise_scale(1 - log_step / cfg.max_steps)
+        
+        # Dynamically adjust coverage target: use full coverage during warmup, then switch to target
+        if log_step < cfg.lr_warmup_steps:
+            current_coverage = cfg.prune_coverage_warmup
+        else:
+            current_coverage = cfg.prune_coverage_target
+        vla.module.language_model.model.pruner.set_coverage_target(current_coverage)
 
         # Compute training metrics and loss
         compute_diffusion_l1 = cfg.use_diffusion and batch_idx % cfg.diffusion_sample_freq == 0
@@ -1086,6 +1099,8 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Log the learning rate
             # Make sure to do this AFTER any learning rate modifications (e.g., warmup/decay)
             writer.add_scalar("VLA Train/Learning Rate", scheduler.get_last_lr()[0], log_step)
+            # Log the coverage target
+            writer.add_scalar("VLA Train/Coverage Target", current_coverage, log_step)
 
         # Optimizer and LR scheduler step
         if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:

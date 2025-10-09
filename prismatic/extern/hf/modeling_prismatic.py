@@ -76,6 +76,10 @@ class TokenPruner(nn.Module):
 
     def set_noise_scale(self, noise_scale):
         self.noise_scale = noise_scale
+    
+    def set_coverage_target(self, coverage_target):
+        """Dynamically set the coverage target for token pruning"""
+        self.coverage_target = coverage_target
 
     def rms_norm(self, hidden_states, eps=1e-6):
         input_dtype = hidden_states.dtype
