@@ -816,6 +816,20 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         # Instantiate LLM Backbone
         num_patches = self.vision_backbone.get_num_patches() * self.vision_backbone.get_num_images_in_input()
+        # Bridge prune-related config fields from outer config to text_config so TokenPruner can see them
+        for key in (
+            "prune_selection_strategy",
+            "prune_temperature",
+            "prune_target_coverage",
+            "prune_min_keep",
+            "prune_max_keep",
+            "prune_keep_bins",
+            "prune_top_k",
+            "prune_debug",
+            "prune_debug_max_logs",
+        ):
+            if hasattr(config, key) and not hasattr(config.text_config, key):
+                setattr(config.text_config, key, getattr(config, key))
         self.language_model = PrunedLlamaForCausalLM(config.text_config, num_patches)
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = config.pad_token_id
