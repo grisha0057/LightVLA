@@ -1086,6 +1086,23 @@ def finetune(cfg: FinetuneConfig) -> None:
                 metrics = f'Step {log_step}: '
                 for name, metric in smoothened_metrics.items():
                     metrics += f'{name}={metric:.4f} | '
+
+                # Append keep-counts (pruning) summary if available
+                try:
+                    pruner = (
+                        vla.module.language_model.model.pruner
+                        if hasattr(vla, 'module') else vla.language_model.model.pruner
+                    )
+                    kc = getattr(pruner, '_last_keep_counts', None)
+                    if kc is not None:
+                        kc_t = torch.as_tensor(kc, dtype=torch.float32)
+                        kc_min = int(kc_t.min().item())
+                        kc_max = int(kc_t.max().item())
+                        kc_mean = kc_t.mean().item()
+                        metrics += f'keep_counts(min/mean/max)={kc_min}/{kc_mean:.1f}/{kc_max} | '
+                except Exception:
+                    pass
+
                 print(metrics)
 
         # [If applicable] Linearly warm up learning rate from 10% to 100% of original

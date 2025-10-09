@@ -225,8 +225,14 @@ class TokenPruner(nn.Module):
         )
 
         if self.training:
+            # Soft gating during training (no hard pruning)
             weights = torch.softmax(score / max(self.coverage_temperature, self._coverage_eps), dim=-1)
             patches = patches * weights.unsqueeze(-1)
+
+            # Optionally compute and stash keep-counts for logging/monitoring
+            if self.debug:
+                keep_counts, _ = self._budgeted_keep_counts(score)
+                self._last_keep_counts = keep_counts.detach().to("cpu")
             tokens = torch.cat([cls_token, patches, task], dim=1)
             position_ids = torch.cat([cls_token_id, patches_id, task_id], dim=1)
             if attention_mask is not None:
