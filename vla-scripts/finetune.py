@@ -119,7 +119,7 @@ class FinetuneConfig:
     prune_prompt_aggregation: str = "logsumexp"      # Prompt aggregation: "max" or "logsumexp"
     prune_logsumexp_temperature: float = 1.0         # Temperature for logsumexp (lower=closer to max, higher=smoother)
     prune_soft_rescale_mean_preserve: bool = True    # If True, multiply softmax weights by num_patches to preserve energy
-    prune_soft_rescale_clip: Optional[float] = 10.0  # Clip softmax weights to prevent extreme values (None = no clip)
+    prune_soft_rescale_clip: Optional[float] = 3.0  # Clip softmax weights to prevent extreme values (None = no clip)
 
     # Logging
     tensorboard_log_dir: str = Path("logs/tensorboard")
