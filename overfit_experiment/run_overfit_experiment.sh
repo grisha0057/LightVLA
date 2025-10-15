@@ -94,6 +94,12 @@ WARMUP_STEPS=${OVERFIT_WARMUP_STEPS:-200}
 COVERAGE_WARMUP=${OVERFIT_COVERAGE_WARMUP:-1.0}
 COVERAGE_TARGET=${OVERFIT_COVERAGE_TARGET:-0.98}
 
+# 新增剪枝超参（可通过环境变量覆盖）
+PRUNE_AGGREGATION=${PRUNE_AGGREGATION:-"logsumexp"}
+PRUNE_LSE_TEMP=${PRUNE_LSE_TEMP:-1.0}
+PRUNE_RESCALE=${PRUNE_RESCALE:-True}
+PRUNE_CLIP=${PRUNE_CLIP:-10.0}
+
 if [ "${NPROC}" = "1" ]; then
   echo "🔧 单卡模式：跳过 torchrun，直接运行 Python 以避免分布式初始化。"
   stdbuf -oL -eL python -u vla-scripts/finetune.py \
@@ -112,6 +118,10 @@ if [ "${NPROC}" = "1" ]; then
     --lr_decay_gamma ${GAMMA} \
     --prune_coverage_warmup ${COVERAGE_WARMUP} \
     --prune_coverage_target ${COVERAGE_TARGET} \
+    --prune_prompt_aggregation ${PRUNE_AGGREGATION} \
+    --prune_logsumexp_temperature ${PRUNE_LSE_TEMP} \
+    --prune_soft_rescale_mean_preserve ${PRUNE_RESCALE} \
+    --prune_soft_rescale_clip ${PRUNE_CLIP} \
     --grad_accumulation_steps 2 \
     --max_steps ${MAX_STEPS} \
     --save_freq ${SAVE_FREQ} \
@@ -144,6 +154,10 @@ else
   --lr_decay_gamma ${GAMMA} \
   --prune_coverage_warmup ${COVERAGE_WARMUP} \
   --prune_coverage_target ${COVERAGE_TARGET} \
+  --prune_prompt_aggregation ${PRUNE_AGGREGATION} \
+  --prune_logsumexp_temperature ${PRUNE_LSE_TEMP} \
+  --prune_soft_rescale_mean_preserve ${PRUNE_RESCALE} \
+  --prune_soft_rescale_clip ${PRUNE_CLIP} \
   --grad_accumulation_steps 2 \
   --max_steps ${MAX_STEPS} \
   --save_freq ${SAVE_FREQ} \

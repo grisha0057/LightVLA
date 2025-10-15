@@ -114,6 +114,12 @@ class FinetuneConfig:
     # Token Pruning (Coverage Target Scheduling)
     prune_coverage_warmup: float = 1.0               # Coverage target during warmup (1.0 = no pruning, keep all tokens)
     prune_coverage_target: float = 0.98              # Final coverage target after warmup
+    
+    # Token Pruning (Advanced)
+    prune_prompt_aggregation: str = "logsumexp"      # Prompt aggregation: "max" or "logsumexp"
+    prune_logsumexp_temperature: float = 1.0         # Temperature for logsumexp (lower=closer to max, higher=smoother)
+    prune_soft_rescale_mean_preserve: bool = True    # If True, multiply softmax weights by num_patches to preserve energy
+    prune_soft_rescale_clip: Optional[float] = 10.0  # Clip softmax weights to prevent extreme values (None = no clip)
 
     # Logging
     tensorboard_log_dir: str = Path("logs/tensorboard")
@@ -835,6 +841,22 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Set number of images in VLA input
     vla.set_num_images_in_input(cfg.num_images_in_input)
+    
+    # Configure pruning parameters
+    pruner = vla.language_model.model.pruner
+    pruner.prompt_aggregation = cfg.prune_prompt_aggregation
+    pruner.logsumexp_temperature = cfg.prune_logsumexp_temperature
+    pruner.soft_rescale_mean_preserve = cfg.prune_soft_rescale_mean_preserve
+    pruner.soft_rescale_clip = cfg.prune_soft_rescale_clip
+    
+    if distributed_state.is_main_process:
+        print(f"🔧 Pruning Configuration:")
+        print(f"  - Prompt Aggregation: {cfg.prune_prompt_aggregation}")
+        print(f"  - LSE Temperature: {cfg.prune_logsumexp_temperature}")
+        print(f"  - Mean Preserve: {cfg.prune_soft_rescale_mean_preserve}")
+        print(f"  - Rescale Clip: {cfg.prune_soft_rescale_clip}")
+        print(f"  - Coverage Warmup: {cfg.prune_coverage_warmup}")
+        print(f"  - Coverage Target: {cfg.prune_coverage_target}")
 
     # LoRA setup
     if cfg.use_lora:
