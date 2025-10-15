@@ -74,6 +74,22 @@ class TokenPruner(nn.Module):
         # Numerical helpers
         self._coverage_eps = 1e-6
 
+        # Aggregation strategy for prompt tokens: "max" or "logsumexp"
+        # - "max": emphasizes "hit any single word" (faster, more sparse)
+        # - "logsumexp": smoother aggregation for multi-word semantic combinations
+        #   (e.g., "red + cube + left side"), better captures joint evidence
+        self.prompt_aggregation = getattr(config, "prune_prompt_aggregation", "logsumexp")
+        self.logsumexp_temperature = getattr(config, "prune_logsumexp_temperature", 1.0)
+
+        # Optional: mean-preserving rescale for soft gating (multiply by num_patches)
+        # This can help avoid weakening the vision signal when using softmax weights
+        # by keeping the expected per-token scale around 1 instead of ~1/num_patches.
+        # Safety clip allows capping very peaked distributions.
+        self.soft_rescale_mean_preserve = getattr(
+            config, "prune_soft_rescale_mean_preserve", False
+        )
+        self.soft_rescale_clip = getattr(config, "prune_soft_rescale_clip", None)
+
     def set_noise_scale(self, noise_scale):
         self.noise_scale = noise_scale
     
@@ -120,8 +136,19 @@ class TokenPruner(nn.Module):
             expanded_mask = prompt_mask.unsqueeze(1).unsqueeze(2)
             attn_logits = attn_logits.masked_fill(~expanded_mask, float("-inf"))
 
-        # Aggregate signal across tokens and heads
-        token_scores = attn_logits.max(dim=-1).values  # (B, H, P)
+        # Aggregate signal across prompt tokens (last dimension)
+        if self.prompt_aggregation == "logsumexp":
+            # Log-sum-exp aggregation: smoother, captures joint evidence from multiple tokens
+            # LSE(x) = log(sum(exp(x))) - captures "soft OR" over prompt tokens
+            # Temperature controls smoothness: lower = closer to max, higher = closer to mean
+            token_scores = torch.logsumexp(
+                attn_logits / self.logsumexp_temperature, dim=-1
+            ) * self.logsumexp_temperature  # (B, H, P)
+        else:
+            # Max aggregation: emphasizes "hit any single word"
+            token_scores = attn_logits.max(dim=-1).values  # (B, H, P)
+        
+        # Aggregate across attention heads
         score = token_scores.mean(dim=1)  # (B, P)
 
         score = torch.where(torch.isfinite(score), score, torch.zeros_like(score))
@@ -226,7 +253,15 @@ class TokenPruner(nn.Module):
 
         if self.training:
             # Soft gating during training (no hard pruning)
-            weights = torch.softmax(score / max(self.coverage_temperature, self._coverage_eps), dim=-1)
+            weights = torch.softmax(
+                score / max(self.coverage_temperature, self._coverage_eps), dim=-1
+            )
+            if self.soft_rescale_mean_preserve:
+                # Mean-preserving rescale: E[weights] ~ 1 so average token scale is unchanged.
+                weights = weights * patches.shape[1]
+                if self.soft_rescale_clip is not None:
+                    # Optional safety: cap very large scales if distribution is extremely peaked
+                    weights = torch.clamp(weights, max=float(self.soft_rescale_clip))
             patches = patches * weights.unsqueeze(-1)
 
             # Optionally compute and stash keep-counts for logging/monitoring
@@ -827,6 +862,10 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             "prune_top_k",
             "prune_debug",
             "prune_debug_max_logs",
+            "prune_prompt_aggregation",
+            "prune_logsumexp_temperature",
+            "prune_soft_rescale_mean_preserve",
+            "prune_soft_rescale_clip",
         ):
             if hasattr(config, key) and not hasattr(config.text_config, key):
                 setattr(config.text_config, key, getattr(config, key))
