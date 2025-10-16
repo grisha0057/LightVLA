@@ -85,14 +85,14 @@ fi
 
 LOG_FILE=${RUN_ROOT_DIR}/train_$(date +%Y%m%d_%H%M%S).log
 
-LR=${OVERFIT_LR:-3e-4}
-MAX_STEPS=${OVERFIT_MAX_STEPS:-1500}
-SAVE_FREQ=${OVERFIT_SAVE_FREQ:-250}
-MILESTONES=${OVERFIT_DECAY_MILESTONES:-"[500,1000]"}
+LR=${OVERFIT_LR:-1e-4}
+MAX_STEPS=${OVERFIT_MAX_STEPS:-1000}
+SAVE_FREQ=${OVERFIT_SAVE_FREQ:-1000}
+MILESTONES=${OVERFIT_DECAY_MILESTONES:-"[100000]"}
 GAMMA=${OVERFIT_DECAY_GAMMA:-0.5}
-WARMUP_STEPS=${OVERFIT_WARMUP_STEPS:-200}
+WARMUP_STEPS=${OVERFIT_WARMUP_STEPS:-1000}
 COVERAGE_WARMUP=${OVERFIT_COVERAGE_WARMUP:-1.0}
-COVERAGE_TARGET=${OVERFIT_COVERAGE_TARGET:-0.98}
+COVERAGE_TARGET=${OVERFIT_COVERAGE_TARGET:-1.0}
 
 # 新增剪枝超参（可通过环境变量覆盖）
 PRUNE_AGGREGATION=${PRUNE_AGGREGATION:-"logsumexp"}
@@ -118,18 +118,19 @@ if [ "${NPROC}" = "1" ]; then
     --lr_decay_gamma ${GAMMA} \
     --prune_coverage_warmup ${COVERAGE_WARMUP} \
     --prune_coverage_target ${COVERAGE_TARGET} \
+    --prune_disable True \
     --prune_prompt_aggregation ${PRUNE_AGGREGATION} \
     --prune_logsumexp_temperature ${PRUNE_LSE_TEMP} \
     --prune_soft_rescale_mean_preserve ${PRUNE_RESCALE} \
     --prune_soft_rescale_clip ${PRUNE_CLIP} \
-    --grad_accumulation_steps 2 \
+    --grad_accumulation_steps 16 \
     --max_steps ${MAX_STEPS} \
     --save_freq ${SAVE_FREQ} \
     --save_latest_checkpoint_only False \
     --image_aug False \
-    --lora_rank 16 \
+    --lora_rank 8 \
     --run_root_dir "${RUN_ROOT_DIR}" \
-    --shuffle_buffer_size 1000 \
+    --shuffle_buffer_size 1 \
     --log_freq 20 2>&1 | tee -a ${LOG_FILE}
 else
   # 多卡模式：恢复 --standalone，减少不必要的名字解析与外部依赖
@@ -154,18 +155,19 @@ else
   --lr_decay_gamma ${GAMMA} \
   --prune_coverage_warmup ${COVERAGE_WARMUP} \
   --prune_coverage_target ${COVERAGE_TARGET} \
+  --prune_disable True \
   --prune_prompt_aggregation ${PRUNE_AGGREGATION} \
   --prune_logsumexp_temperature ${PRUNE_LSE_TEMP} \
   --prune_soft_rescale_mean_preserve ${PRUNE_RESCALE} \
   --prune_soft_rescale_clip ${PRUNE_CLIP} \
-  --grad_accumulation_steps 2 \
+  --grad_accumulation_steps 16 \
   --max_steps ${MAX_STEPS} \
   --save_freq ${SAVE_FREQ} \
   --save_latest_checkpoint_only False \
   --image_aug False \
-  --lora_rank 16 \
+  --lora_rank 8 \
   --run_root_dir "${RUN_ROOT_DIR}" \
-  --shuffle_buffer_size 1000 \
+  --shuffle_buffer_size 1 \
   --log_freq 20 2>&1 | tee -a ${LOG_FILE}
 fi
 
