@@ -87,6 +87,7 @@ class FinetuneConfig:
     # Training configuration
     batch_size: int = 8                              # Batch size per device (total batch size = batch_size * num GPUs)
     learning_rate: float = 5e-4                      # Learning rate
+    weight_decay: float = 0.0                        # Weight decay for AdamW (0.0 recommended for overfit stability)
     lr_warmup_steps: int = 0                         # Number of steps to warm up learning rate (from 10% to 100%)
     lr_decay_milestones: Tuple[int, ...] = (100_000,)  # Milestones at which LR decays (can be multiple)
     lr_decay_gamma: float = 0.1                      # Multiplicative factor of learning rate decay at each milestone
@@ -116,10 +117,11 @@ class FinetuneConfig:
     prune_coverage_target: float = 0.98              # Final coverage target after warmup
     
     # Token Pruning (Advanced)
+    prune_disable: bool = False                      # If True, fully disable pruning and gating (keep all visual tokens)
     prune_prompt_aggregation: str = "logsumexp"      # Prompt aggregation: "max" or "logsumexp"
     prune_logsumexp_temperature: float = 1.0         # Temperature for logsumexp (lower=closer to max, higher=smoother)
     prune_soft_rescale_mean_preserve: bool = True    # If True, multiply softmax weights by num_patches to preserve energy
-    prune_soft_rescale_clip: Optional[float] = 3.0  # Clip softmax weights to prevent extreme values (None = no clip)
+    prune_soft_rescale_clip: Optional[float] = 3.0   # Clip softmax weights to prevent extreme values (None = no clip)
 
     # Logging
     tensorboard_log_dir: str = Path("logs/tensorboard")
@@ -398,15 +400,16 @@ def run_forward_pass(
         if use_l1_regression:
             # Predict action
             predicted_actions = action_head.module.predict_action(actions_hidden_states)
-            # Get full L1 loss
-            loss = torch.nn.L1Loss()(ground_truth_actions, predicted_actions)
+            # Compute L1 in float32 for numerical stability
+            loss = nn.functional.l1_loss(ground_truth_actions.float(), predicted_actions.float())
 
         if use_diffusion:
             # Predict noise
             noise_pred = action_head.module.predict_noise(actions_hidden_states)
             # Get diffusion noise prediction MSE loss
             noise_pred = noise_pred.reshape(noise.shape)
-            loss = nn.functional.mse_loss(noise_pred, noise, reduction="mean")
+            # Compute MSE in float32 for numerical stability
+            loss = nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
 
             # Only sample actions and compute L1 losses if specified
             if compute_diffusion_l1:
@@ -440,8 +443,13 @@ def run_forward_pass(
             predicted_curr_action = predicted_actions[:, 0]
             ground_truth_next_actions = ground_truth_actions[:, 1:]
             predicted_next_actions = predicted_actions[:, 1:]
-            curr_action_l1_loss = torch.nn.L1Loss()(ground_truth_curr_action, predicted_curr_action)
-            next_actions_l1_loss = torch.nn.L1Loss()(ground_truth_next_actions, predicted_next_actions)
+            # Log L1 components in float32 for consistency
+            curr_action_l1_loss = nn.functional.l1_loss(
+                ground_truth_curr_action.float(), predicted_curr_action.float()
+            )
+            next_actions_l1_loss = nn.functional.l1_loss(
+                ground_truth_next_actions.float(), predicted_next_actions.float()
+            )
             metrics.update(
                 {
                     "curr_action_l1_loss": curr_action_l1_loss.item(),
@@ -848,9 +856,12 @@ def finetune(cfg: FinetuneConfig) -> None:
     pruner.logsumexp_temperature = cfg.prune_logsumexp_temperature
     pruner.soft_rescale_mean_preserve = cfg.prune_soft_rescale_mean_preserve
     pruner.soft_rescale_clip = cfg.prune_soft_rescale_clip
+    if cfg.prune_disable:
+        pruner.set_disabled(True)
     
     if distributed_state.is_main_process:
         print(f"🔧 Pruning Configuration:")
+        print(f"  - Disabled: {cfg.prune_disable}")
         print(f"  - Prompt Aggregation: {cfg.prune_prompt_aggregation}")
         print(f"  - LSE Temperature: {cfg.prune_logsumexp_temperature}")
         print(f"  - Mean Preserve: {cfg.prune_soft_rescale_mean_preserve}")
@@ -952,7 +963,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     if cfg.use_proprio:
         trainable_params += [param for param in proprio_projector.parameters() if param.requires_grad]
     print(f"# total trainable params: {sum(p.numel() for p in trainable_params)}")
-    optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
+    optimizer = AdamW(trainable_params, lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
 
     # Record original learning rate
     original_lr = optimizer.param_groups[0]["lr"]

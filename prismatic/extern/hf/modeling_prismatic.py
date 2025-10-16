@@ -56,6 +56,8 @@ class TokenPruner(nn.Module):
         self.num_patches = num_patches
         self.noise_scale = None
         self.scale_factor = 1 / math.sqrt(config.hidden_size)
+        # Allow fully disabling pruning/gating for ablations
+        self.disabled: bool = getattr(config, "prune_disabled", False)
 
         # === Pruning configuration ===
         self.selection_strategy = getattr(config, "prune_selection_strategy", "coverage")
@@ -96,6 +98,10 @@ class TokenPruner(nn.Module):
     def set_coverage_target(self, coverage_target):
         """Dynamically set the coverage target for token pruning"""
         self.coverage_target = coverage_target
+
+    def set_disabled(self, disabled: bool):
+        """Enable/disable pruning and gating entirely (keep all tokens as-is)."""
+        self.disabled = bool(disabled)
 
     def rms_norm(self, hidden_states, eps=1e-6):
         input_dtype = hidden_states.dtype
@@ -233,6 +239,17 @@ class TokenPruner(nn.Module):
         k_proj_bias,
         num_heads,
     ):
+        # Short-circuit: fully disable pruning/gating (identity pass-through)
+        if self.disabled:
+            # Populate `_last_keep_counts` so callers can log expected keeps
+            bsz = tokens.shape[0]
+            self._last_keep_counts = (
+                torch.full((bsz,), self.num_patches, dtype=torch.int64, device=tokens.device)
+                .detach()
+                .to("cpu")
+            )
+            return tokens, position_ids, attention_mask
+
         bsz, seq_len, dim = tokens.shape
         cls_token, patches, task = torch.split(tokens, [1, self.num_patches, seq_len-self.num_patches-1], dim=1)
         cls_token_id, patches_id, task_id = torch.split(position_ids, [1, self.num_patches, seq_len-self.num_patches-1], dim=1)
@@ -866,6 +883,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             "prune_logsumexp_temperature",
             "prune_soft_rescale_mean_preserve",
             "prune_soft_rescale_clip",
+            "prune_disabled",
         ):
             if hasattr(config, key) and not hasattr(config.text_config, key):
                 setattr(config.text_config, key, getattr(config, key))
