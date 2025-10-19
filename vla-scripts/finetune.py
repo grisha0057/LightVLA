@@ -400,8 +400,8 @@ def run_forward_pass(
         if use_l1_regression:
             # Predict action
             predicted_actions = action_head.module.predict_action(actions_hidden_states)
-            # Compute L1 in float32 for numerical stability
-            loss = nn.functional.l1_loss(ground_truth_actions.float(), predicted_actions.float())
+            # Compute L1 in BF16 (match tensor dtypes)
+            loss = nn.functional.l1_loss(ground_truth_actions, predicted_actions)
 
         if use_diffusion:
             # Predict noise
@@ -443,12 +443,12 @@ def run_forward_pass(
             predicted_curr_action = predicted_actions[:, 0]
             ground_truth_next_actions = ground_truth_actions[:, 1:]
             predicted_next_actions = predicted_actions[:, 1:]
-            # Log L1 components in float32 for consistency
+            # Log L1 components in BF16 (match tensor dtypes)
             curr_action_l1_loss = nn.functional.l1_loss(
-                ground_truth_curr_action.float(), predicted_curr_action.float()
+                ground_truth_curr_action, predicted_curr_action
             )
             next_actions_l1_loss = nn.functional.l1_loss(
-                ground_truth_next_actions.float(), predicted_next_actions.float()
+                ground_truth_next_actions, predicted_next_actions
             )
             metrics.update(
                 {

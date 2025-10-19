@@ -120,8 +120,7 @@ if [ "${NPROC}" = "1" ]; then
     --lr_decay_gamma ${GAMMA} \
     --prune_coverage_warmup ${COVERAGE_WARMUP} \
     --prune_coverage_target ${COVERAGE_TARGET} \
-    --prune_disable True \
-    --prune_disable True \
+    --prune_disable False \
     --prune_prompt_aggregation ${PRUNE_AGGREGATION} \
     --prune_logsumexp_temperature ${PRUNE_LSE_TEMP} \
     --prune_soft_rescale_mean_preserve ${PRUNE_RESCALE} \
@@ -131,7 +130,6 @@ if [ "${NPROC}" = "1" ]; then
     --save_freq ${SAVE_FREQ} \
     --save_latest_checkpoint_only False \
     --image_aug False \
-    --lora_rank 8 \
     --lora_rank 8 \
     --run_root_dir "${RUN_ROOT_DIR}" \
     --shuffle_buffer_size 1 \
@@ -160,8 +158,7 @@ else
   --lr_decay_gamma ${GAMMA} \
   --prune_coverage_warmup ${COVERAGE_WARMUP} \
   --prune_coverage_target ${COVERAGE_TARGET} \
-  --prune_disable True \
-  --prune_disable True \
+  --prune_disable False \
   --prune_prompt_aggregation ${PRUNE_AGGREGATION} \
   --prune_logsumexp_temperature ${PRUNE_LSE_TEMP} \
   --prune_soft_rescale_mean_preserve ${PRUNE_RESCALE} \
@@ -171,7 +168,6 @@ else
   --save_freq ${SAVE_FREQ} \
   --save_latest_checkpoint_only False \
   --image_aug False \
-  --lora_rank 8 \
   --lora_rank 8 \
   --run_root_dir "${RUN_ROOT_DIR}" \
   --shuffle_buffer_size 1 \
