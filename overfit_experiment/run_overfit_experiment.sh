@@ -91,7 +91,9 @@ SAVE_FREQ=${OVERFIT_SAVE_FREQ:-1000}
 MILESTONES=${OVERFIT_DECAY_MILESTONES:-"[100000]"}
 GAMMA=${OVERFIT_DECAY_GAMMA:-0.5}
 WARMUP_STEPS=${OVERFIT_WARMUP_STEPS:-1000}
+WARMUP_STEPS=${OVERFIT_WARMUP_STEPS:-1000}
 COVERAGE_WARMUP=${OVERFIT_COVERAGE_WARMUP:-1.0}
+COVERAGE_TARGET=${OVERFIT_COVERAGE_TARGET:-1.0}
 COVERAGE_TARGET=${OVERFIT_COVERAGE_TARGET:-1.0}
 
 # 新增剪枝超参（可通过环境变量覆盖）
@@ -119,6 +121,7 @@ if [ "${NPROC}" = "1" ]; then
     --prune_coverage_warmup ${COVERAGE_WARMUP} \
     --prune_coverage_target ${COVERAGE_TARGET} \
     --prune_disable True \
+    --prune_disable True \
     --prune_prompt_aggregation ${PRUNE_AGGREGATION} \
     --prune_logsumexp_temperature ${PRUNE_LSE_TEMP} \
     --prune_soft_rescale_mean_preserve ${PRUNE_RESCALE} \
@@ -129,7 +132,9 @@ if [ "${NPROC}" = "1" ]; then
     --save_latest_checkpoint_only False \
     --image_aug False \
     --lora_rank 8 \
+    --lora_rank 8 \
     --run_root_dir "${RUN_ROOT_DIR}" \
+    --shuffle_buffer_size 1 \
     --shuffle_buffer_size 1 \
     --log_freq 20 2>&1 | tee -a ${LOG_FILE}
 else
@@ -156,6 +161,7 @@ else
   --prune_coverage_warmup ${COVERAGE_WARMUP} \
   --prune_coverage_target ${COVERAGE_TARGET} \
   --prune_disable True \
+  --prune_disable True \
   --prune_prompt_aggregation ${PRUNE_AGGREGATION} \
   --prune_logsumexp_temperature ${PRUNE_LSE_TEMP} \
   --prune_soft_rescale_mean_preserve ${PRUNE_RESCALE} \
@@ -166,7 +172,9 @@ else
   --save_latest_checkpoint_only False \
   --image_aug False \
   --lora_rank 8 \
+  --lora_rank 8 \
   --run_root_dir "${RUN_ROOT_DIR}" \
+  --shuffle_buffer_size 1 \
   --shuffle_buffer_size 1 \
   --log_freq 20 2>&1 | tee -a ${LOG_FILE}
 fi
