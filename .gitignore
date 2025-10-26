@@ -209,3 +209,5 @@ config_private.json
 
 checkpoints/
 datasets/
+rollouts/
+LIBERO/

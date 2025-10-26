@@ -133,7 +133,6 @@ if [ "${NPROC}" = "1" ]; then
     --lora_rank 8 \
     --run_root_dir "${RUN_ROOT_DIR}" \
     --shuffle_buffer_size 1 \
-    --shuffle_buffer_size 1 \
     --log_freq 20 2>&1 | tee -a ${LOG_FILE}
 else
   # 多卡模式：恢复 --standalone，减少不必要的名字解析与外部依赖
@@ -170,7 +169,6 @@ else
   --image_aug False \
   --lora_rank 8 \
   --run_root_dir "${RUN_ROOT_DIR}" \
-  --shuffle_buffer_size 1 \
   --shuffle_buffer_size 1 \
   --log_freq 20 2>&1 | tee -a ${LOG_FILE}
 fi
