@@ -2,8 +2,8 @@
 
 # LightVLA - LIBERO Spatial 完整训练脚本
 # 基于完整的 libero_spatial_no_noops 数据集训练
-# 包含新的视觉 token 筛选逻辑
-# 每2000步进行一次在线推理评估
+# 包含新的视觉 token 筛选逻辑（ST‑TopK 训练门控）
+# 每50步进行一次在线推理评估
 
 set -e
 set -o pipefail
@@ -41,8 +41,8 @@ EXPERIMENT_NAME=${EXPERIMENT_NAME:-"libero_spatial_$(date +%Y%m%d_%H%M%S)"}
 # ========== 训练超参数（与 overfit 实验保持一致）==========
 # 学习率与调度
 LR=${LR:-1e-4}
-MAX_STEPS=${MAX_STEPS:-8000}
-WARMUP_STEPS=${WARMUP_STEPS:-1000}
+MAX_STEPS=${MAX_STEPS:-1000}
+WARMUP_STEPS=${WARMUP_STEPS:-100}
 DECAY_MILESTONES=${DECAY_MILESTONES:-"[100000]"}  # 基本不衰减
 DECAY_GAMMA=${DECAY_GAMMA:-0.5}
 
@@ -54,7 +54,7 @@ GRAD_ACCUMULATION=${GRAD_ACCUMULATION:-8}
 LORA_RANK=${LORA_RANK:-8}
 
 # 保存策略
-SAVE_FREQ=${SAVE_FREQ:-2000}                       # 每2000步保存+评估
+SAVE_FREQ=${SAVE_FREQ:-100}                       # 每100步保存+评估
 SAVE_LATEST_ONLY=${SAVE_LATEST_ONLY:-False}
 
 # 数据增强（与 overfit 一致：关闭）
@@ -64,10 +64,12 @@ IMAGE_AUG=${IMAGE_AUG:-False}
 # 启用/禁用筛选
 PRUNE_DISABLE=${PRUNE_DISABLE:-False}
 
-# Coverage 参数：使用剪枝加速训练（优化后：更激进的剪枝）
-# 注意：评估时会自动使用 COVERAGE_TARGET，确保训练和评估一致
-COVERAGE_WARMUP=${COVERAGE_WARMUP:-1.0}     # 初始保留比例（100%，warmup期间保持稳定）
-COVERAGE_TARGET=${COVERAGE_TARGET:-0.90}    # 目标保留比例（90%，剪枝10%不重要的tokens）
+# Coverage 参数（副旋钮）：跟随最小保留或独立调度
+COVERAGE_WARMUP=${COVERAGE_WARMUP:-1.0}
+COVERAGE_TARGET=${COVERAGE_TARGET:-0.40}
+PRUNE_COVERAGE_RAMP_STEPS=${PRUNE_COVERAGE_RAMP_STEPS:-2000}
+PRUNE_COVERAGE_FOLLOW_MIN_KEEP=${PRUNE_COVERAGE_FOLLOW_MIN_KEEP:-True}
+PRUNE_COVERAGE_OFFSET=${PRUNE_COVERAGE_OFFSET:-0.05}
 
 # 聚合方式：logsumexp（推荐）| mean | max
 PRUNE_AGGREGATION=${PRUNE_AGGREGATION:-"logsumexp"}
@@ -76,6 +78,18 @@ PRUNE_LSE_TEMP=${PRUNE_LSE_TEMP:-1.0}      # LogSumExp 温度参数
 # Soft rescale 参数
 PRUNE_RESCALE=${PRUNE_RESCALE:-True}        # 启用均值保持的 rescale
 PRUNE_CLIP=${PRUNE_CLIP:-10.0}             # Rescale 裁剪阈值
+
+# ST-TopK 训练（Gumbel-Softmax + 直通）
+PRUNE_TRAIN_USE_ST_TOPK=${PRUNE_TRAIN_USE_ST_TOPK:-True}
+PRUNE_TAU_START=${PRUNE_TAU_START:-1.0}
+PRUNE_TAU_END=${PRUNE_TAU_END:-0.25}
+PRUNE_TAU_RAMP_STEPS=${PRUNE_TAU_RAMP_STEPS:-300}
+
+# 最小保留比例（主旋钮）
+PRUNE_DISABLE_KEEP_BINS=${PRUNE_DISABLE_KEEP_BINS:-True}
+PRUNE_MIN_KEEP_RATIO_WARMUP=${PRUNE_MIN_KEEP_RATIO_WARMUP:-1.0}
+PRUNE_MIN_KEEP_RATIO_TARGET=${PRUNE_MIN_KEEP_RATIO_TARGET:-0.32}
+PRUNE_MIN_KEEP_RAMP_STEPS=${PRUNE_MIN_KEEP_RAMP_STEPS:-700}
 
 # ========== 评估配置 ==========
 EVAL_NUM_TRIALS=${EVAL_NUM_TRIALS:-4}       # 每个任务评估4次（快速评估）
@@ -91,18 +105,18 @@ export CUDA_VISIBLE_DEVICES=${CUDA_DEVICES}
 export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 export MASTER_PORT=${MASTER_PORT:-29500}
 
-# NCCL 配置
-export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-lo}
-export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
-export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-0}
-export NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY:-AF_INET}
-export NCCL_ASYNC_ERROR_HANDLING=${NCCL_ASYNC_ERROR_HANDLING:-1}
-export NCCL_BLOCKING_WAIT=${NCCL_BLOCKING_WAIT:-0}
+# # NCCL 配置
+# export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-lo}
+# export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+# export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-0}
+# export NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY:-AF_INET}
+# export NCCL_ASYNC_ERROR_HANDLING=${NCCL_ASYNC_ERROR_HANDLING:-1}
+# export NCCL_BLOCKING_WAIT=${NCCL_BLOCKING_WAIT:-0}
 
-# Gloo 配置
-export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-lo}
-export GLOO_DISABLE_IPV6=${GLOO_DISABLE_IPV6:-1}
-export GLOO_DEVICE_TRANSPORT=${GLOO_DEVICE_TRANSPORT:-TCP}
+# # Gloo 配置
+# export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-lo}
+# export GLOO_DISABLE_IPV6=${GLOO_DISABLE_IPV6:-1}
+# export GLOO_DEVICE_TRANSPORT=${GLOO_DEVICE_TRANSPORT:-TCP}
 
 # 调试
 export TORCH_DISTRIBUTED_DEBUG=${TORCH_DISTRIBUTED_DEBUG:-OFF}
@@ -131,8 +145,10 @@ echo "  - 图像增强: ${IMAGE_AUG}"
 echo ""
 echo "🔍 视觉 Token 筛选："
 echo "  - 启用: $([ "${PRUNE_DISABLE}" = "False" ] && echo '✅' || echo '❌')"
-echo "  - 训练 Coverage: ${COVERAGE_WARMUP} -> ${COVERAGE_TARGET}"
-echo "  - 评估 Coverage: ${COVERAGE_TARGET} (与训练后期保持一致)"
+echo "  - 最小保留比例: ${PRUNE_MIN_KEEP_RATIO_WARMUP} -> ${PRUNE_MIN_KEEP_RATIO_TARGET} (ramp ${PRUNE_MIN_KEEP_RAMP_STEPS})"
+echo "  - Coverage: ${COVERAGE_WARMUP} -> ${COVERAGE_TARGET} (follow_min_keep=${PRUNE_COVERAGE_FOLLOW_MIN_KEEP}, +${PRUNE_COVERAGE_OFFSET})"
+echo "  - 量化桶: $([ "${PRUNE_DISABLE_KEEP_BINS}" = "True" ] && echo '禁用' || echo '启用')"
+echo "  - Gumbel 温度: ${PRUNE_TAU_START} -> ${PRUNE_TAU_END} (ramp ${PRUNE_TAU_RAMP_STEPS})"
 echo "  - 聚合方式: ${PRUNE_AGGREGATION}"
 echo ""
 echo "🎮 评估配置："
@@ -228,10 +244,54 @@ run_evaluation() {
     local checkpoint_path=$1
     local step=$2
     
+    # 根据当前 step 计算评测用的 min_keep_ratio 与 coverage
+    local ratio_warm=${PRUNE_MIN_KEEP_RATIO_WARMUP}
+    local ratio_tgt=${PRUNE_MIN_KEEP_RATIO_TARGET}
+    local ratio_ramp=${PRUNE_MIN_KEEP_RAMP_STEPS}
+    local cov_follow=${PRUNE_COVERAGE_FOLLOW_MIN_KEEP}
+    local cov_off=${PRUNE_COVERAGE_OFFSET}
+    local ratio
+    if [ ${step} -lt ${WARMUP_STEPS} ]; then
+        ratio=${ratio_warm}
+    else
+        # 线性插值：从 warmup 步开始到 ramp 完成
+        local passed=$(( step - WARMUP_STEPS ))
+        if [ ${passed} -lt 0 ]; then passed=0; fi
+        if [ ${ratio_ramp} -le 0 ]; then
+            ratio=${ratio_tgt}
+        else
+            # clamp 到 [0,1]
+            local num=$(python - <<PY
+passed=${passed}
+ratio_ramp=${ratio_ramp}
+print(min(1.0, max(0.0, passed/ratio_ramp)))
+PY
+)
+            ratio=$(python - <<PY
+rw=${ratio_warm}
+rt=${ratio_tgt}
+p=${num}
+print((1.0-p)*rw + p*rt)
+PY
+)
+        fi
+    fi
+    local cov
+    if [ "${cov_follow}" = "True" ]; then
+        cov=$(python - <<PY
+ratio=${ratio}
+off=${cov_off}
+print(min(0.999, ratio+off))
+PY
+)
+    else
+        cov=${COVERAGE_TARGET}
+    fi
+    
     echo ""
     echo "============================================"
     echo "🎮 开始评估 Checkpoint: ${checkpoint_path}"
-    echo "   Step: ${step}"
+    echo "   Step: ${step} | min_keep_ratio=${ratio} | coverage=${cov}"
     echo "============================================"
     
     # 保存当前 CUDA_VISIBLE_DEVICES
@@ -257,7 +317,10 @@ run_evaluation() {
         --lora_rank ${LORA_RANK} \
         --center_crop False \
         --num_trials_per_task ${EVAL_NUM_TRIALS} \
-        --prune_coverage_target ${COVERAGE_TARGET} \
+        --prune_disable_keep_bins ${PRUNE_DISABLE_KEEP_BINS} \
+        --prune_min_keep_ratio ${ratio} \
+        --prune_coverage_follow_min_keep ${PRUNE_COVERAGE_FOLLOW_MIN_KEEP} \
+        --prune_coverage_offset ${PRUNE_COVERAGE_OFFSET} \
         --run_id_note "step_${step}" \
         --local_log_dir "${EXPERIMENT_DIR}/eval_logs" \
         --save_rollout_video False \
@@ -303,11 +366,26 @@ for stage in $(seq 1 ${NUM_STAGES}); do
     TARGET_STEP=$((stage * SAVE_FREQ))
     STEPS_THIS_STAGE=$((TARGET_STEP - CURRENT_STEP))
     
+    # 判断是否需要续训
+    if [ ${stage} -eq 1 ]; then
+        # 第一阶段：从头开始训练
+        RESUME_FLAG="False"
+        RESUME_STEP_ARG=""
+        TRAIN_MODE="从头训练"
+    else
+        # 后续阶段：从上一个checkpoint继续训练
+        RESUME_FLAG="True"
+        RESUME_STEP_ARG="--resume_step ${CURRENT_STEP}"
+        TRAIN_MODE="续训（从Step ${CURRENT_STEP}继续）"
+    fi
+    
     echo ""
     echo "============================================"
     echo "🏃 阶段 ${stage}/${NUM_STAGES}: 训练至 ${TARGET_STEP} 步"
     echo "   当前步数: ${CURRENT_STEP}"
     echo "   本阶段训练: ${STEPS_THIS_STAGE} 步"
+    echo "   训练模式: ${TRAIN_MODE}"
+    echo "   Checkpoint: ${LAST_CHECKPOINT_PATH}"
     echo "============================================"
     echo ""
     
@@ -323,6 +401,8 @@ for stage in $(seq 1 ${NUM_STAGES}); do
         --data_root_dir "${DATA_ROOT_DIR}" \
         --dataset_name "${DATASET_NAME}" \
         --run_root_dir "${EXPERIMENT_DIR}" \
+        --resume ${RESUME_FLAG} \
+        ${RESUME_STEP_ARG} \
         --use_l1_regression True \
         --use_diffusion False \
         --use_film False \
@@ -342,12 +422,23 @@ for stage in $(seq 1 ${NUM_STAGES}); do
         --prune_disable ${PRUNE_DISABLE} \
         --prune_coverage_warmup ${COVERAGE_WARMUP} \
         --prune_coverage_target ${COVERAGE_TARGET} \
+        --prune_coverage_ramp_steps ${PRUNE_COVERAGE_RAMP_STEPS} \
+        --prune_coverage_follow_min_keep ${PRUNE_COVERAGE_FOLLOW_MIN_KEEP} \
+        --prune_coverage_offset ${PRUNE_COVERAGE_OFFSET} \
         --prune_prompt_aggregation ${PRUNE_AGGREGATION} \
         --prune_logsumexp_temperature ${PRUNE_LSE_TEMP} \
         --prune_soft_rescale_mean_preserve ${PRUNE_RESCALE} \
         --prune_soft_rescale_clip ${PRUNE_CLIP} \
+        --prune_disable_keep_bins ${PRUNE_DISABLE_KEEP_BINS} \
+        --prune_min_keep_ratio_warmup ${PRUNE_MIN_KEEP_RATIO_WARMUP} \
+        --prune_min_keep_ratio_target ${PRUNE_MIN_KEEP_RATIO_TARGET} \
+        --prune_min_keep_ramp_steps ${PRUNE_MIN_KEEP_RAMP_STEPS} \
+        --prune_train_use_st_topk ${PRUNE_TRAIN_USE_ST_TOPK} \
+        --prune_train_gumbel_tau_start ${PRUNE_TAU_START} \
+        --prune_train_gumbel_tau_end ${PRUNE_TAU_END} \
+        --prune_train_gumbel_tau_ramp_steps ${PRUNE_TAU_RAMP_STEPS} \
         --shuffle_buffer_size 10000 \
-        --log_freq 50 2>&1 | tee -a ${LOG_FILE}
+        --log_freq 10 2>&1 | tee -a ${LOG_FILE}
     
     TRAIN_EXIT_CODE=$?
     
@@ -358,22 +449,33 @@ for stage in $(seq 1 ${NUM_STAGES}); do
     
     echo "✅ 阶段 ${stage} 训练完成"
     
-    # 找到新生成的 checkpoint
-    NEW_CHECKPOINT="${EXPERIMENT_DIR}/checkpoint-${TARGET_STEP}"
+    # 找到新生成的 checkpoint（包含时间戳的目录名）
+    # finetune.py 生成的目录格式：run_id--${step}_chkpt
+    # 我们需要找到包含 "--${TARGET_STEP}_chkpt" 的最新目录
+    NEW_CHECKPOINT=$(find "${EXPERIMENT_DIR}" -maxdepth 1 -type d -name "*--${TARGET_STEP}_chkpt" | sort -r | head -1)
     
-    if [ ! -d "${NEW_CHECKPOINT}" ]; then
-        echo "⚠️ 未找到 checkpoint: ${NEW_CHECKPOINT}"
+    if [ -z "${NEW_CHECKPOINT}" ] || [ ! -d "${NEW_CHECKPOINT}" ]; then
+        echo "⚠️ 未找到 checkpoint: *--${TARGET_STEP}_chkpt"
+        echo "   在目录: ${EXPERIMENT_DIR}"
         echo "   跳过本次评估"
+        echo ""
+        echo "   可用的checkpoint目录："
+        ls -ld "${EXPERIMENT_DIR}"/*chkpt 2>/dev/null || echo "   无"
     else
+        echo "✅ 找到 checkpoint: $(basename ${NEW_CHECKPOINT})"
+        
         # 运行评估
         run_evaluation "${NEW_CHECKPOINT}" "${TARGET_STEP}"
         
         # 更新为下一阶段的起点
         LAST_CHECKPOINT_PATH="${NEW_CHECKPOINT}"
+        echo "📝 下一阶段将从此checkpoint继续训练"
     fi
     
     # 更新当前步数
     CURRENT_STEP=${TARGET_STEP}
+    
+    echo ""
 done
 
 # ========== 训练结束 ==========
@@ -387,11 +489,10 @@ echo "📝 训练日志: ${LOG_FILE}"
 echo "📊 评估日志: ${EVAL_LOG_FILE}"
 echo ""
 echo "💾 Checkpoints:"
-find "${EXPERIMENT_DIR}" -name "checkpoint-*" -type d | sort
+find "${EXPERIMENT_DIR}" -maxdepth 1 -type d -name "*chkpt" | sort
 echo ""
 echo "📈 评估结果汇总:"
 if [ -f "${EVAL_LOG_FILE}" ]; then
     grep "Overall success rate" ${EVAL_LOG_FILE} || echo "未找到评估结果"
 fi
 echo ""
-

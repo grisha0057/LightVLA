@@ -114,7 +114,8 @@ class FinetuneConfig:
 
     # Token Pruning (Coverage Target Scheduling)
     prune_coverage_warmup: float = 1.0               # Coverage target during warmup (1.0 = no pruning, keep all tokens)
-    prune_coverage_target: float = 0.98              # Final coverage target after warmup
+    prune_coverage_target: float = 0.90              # Final coverage target after warmup
+    prune_coverage_ramp_steps: int = 1000            # Steps to ramp coverage from warmup -> target after warmup
     
     # Token Pruning (Advanced)
     prune_disable: bool = False                      # If True, fully disable pruning and gating (keep all visual tokens)
@@ -122,6 +123,20 @@ class FinetuneConfig:
     prune_logsumexp_temperature: float = 1.0         # Temperature for logsumexp (lower=closer to max, higher=smoother)
     prune_soft_rescale_mean_preserve: bool = True    # If True, multiply softmax weights by num_patches to preserve energy
     prune_soft_rescale_clip: Optional[float] = 3.0   # Clip softmax weights to prevent extreme values (None = no clip)
+    # Min-keep scheduling
+    prune_min_keep_ratio_warmup: float = 1.0         # Fraction of patches to keep during warmup (relative to num_patches)
+    prune_min_keep_ratio_target: float = 0.32        # Target fraction to keep after ramp (e.g., ~32% of patches for 2 images)
+    prune_min_keep_ramp_steps: int = 6000            # Steps to ramp min_keep ratio from warmup -> target
+    prune_disable_keep_bins: bool = True             # Disable bin quantization by default (use raw keep counts)
+    # Coverage scheduling
+    prune_coverage_ramp_steps: int = 2000            # Steps to ramp coverage (used only if not following min_keep)
+    prune_coverage_follow_min_keep: bool = True      # If True, set coverage ~= min_keep_ratio + offset
+    prune_coverage_offset: float = 0.05              # Coverage offset above min_keep_ratio
+    # ST-TopK training (Gumbel-Softmax + Straight-Through Estimator)
+    prune_train_use_st_topk: bool = True             # If True, use ST-TopK gating during training instead of soft gating
+    prune_train_gumbel_tau_start: float = 1.0        # Initial Gumbel-Softmax temperature (higher = softer)
+    prune_train_gumbel_tau_end: float = 0.25         # Final temperature after anneal (lower = more discrete)
+    prune_train_gumbel_tau_ramp_steps: int = 3000    # Steps to anneal tau from start -> end after warmup
 
     # Logging
     tensorboard_log_dir: str = Path("logs/tensorboard")
@@ -280,6 +295,45 @@ def init_module(
     return wrap_ddp(module, device_id, find_unused_params)
 
 
+def _maybe_load_component_from_base(ddp_module: DDP, base_dir: str, component_stem: str) -> bool:
+    """
+    Best-effort initialization of a DDP-wrapped component (action head / projectors) from a base checkpoint directory.
+
+    Looks for a single file matching `{component_stem}--*_checkpoint.pt` and loads it if found.
+
+    Returns True if successfully loaded, False otherwise.
+    """
+    try:
+        if not os.path.isdir(base_dir):
+            return False
+        matches = [
+            os.path.join(base_dir, f)
+            for f in os.listdir(base_dir)
+            if f.startswith(f"{component_stem}--") and f.endswith("_checkpoint.pt")
+        ]
+        if len(matches) == 0:
+            return False
+        if len(matches) > 1:
+            # Pick the one with the largest step (lexicographically works since step is before suffix)
+            try:
+                def _extract_step(p):
+                    s = os.path.basename(p).split("--")[-1].split("_")[0]
+                    return int(s)
+                matches.sort(key=_extract_step)
+            except Exception:
+                matches.sort()
+        ckpt_path = matches[-1]
+        state = torch.load(ckpt_path, weights_only=True, map_location="cpu")
+        state = remove_ddp_in_checkpoint(state)
+        # DDP-wrapped -> underlying module is `.module`
+        ddp_module.module.load_state_dict(state, strict=False)
+        print(f"Initialized '{component_stem}' from base checkpoint: {ckpt_path}")
+        return True
+    except Exception as e:
+        print(f"Warning: failed to init '{component_stem}' from base '{base_dir}': {e}")
+        return False
+
+
 def run_forward_pass(
     vla,
     action_head,
@@ -361,7 +415,7 @@ def run_forward_pass(
     # Compute metrics for discrete action representation (next-token prediction)
     if not (use_l1_regression or use_diffusion):
         loss = output.loss
-        predicted_token_ids = output.logits[:, num_patches:-1].argmax(dim=2)
+        predicted_token_ids = output.logits[:, num_patches+1 :-1].argmax(dim=2)
         curr_action_accuracy = compute_token_accuracy(
             predicted_token_ids, ground_truth_token_ids, mask=current_action_mask
         )
@@ -388,7 +442,8 @@ def run_forward_pass(
         # Get last layer hidden states
         last_hidden_states = output.hidden_states[-1]  # (B, seq_len, D)
         # Get hidden states for text portion of prompt+response (after the vision patches)
-        text_hidden_states = last_hidden_states[:, num_patches:-1]
+        # text_hidden_states = last_hidden_states[:, num_patches+1 :-1]
+        text_hidden_states = last_hidden_states[:, num_patches + 1 :, :]
         # Get hidden states for action portion of response
         batch_size = batch["input_ids"].shape[0]
         actions_hidden_states = (
@@ -856,8 +911,13 @@ def finetune(cfg: FinetuneConfig) -> None:
     pruner.logsumexp_temperature = cfg.prune_logsumexp_temperature
     pruner.soft_rescale_mean_preserve = cfg.prune_soft_rescale_mean_preserve
     pruner.soft_rescale_clip = cfg.prune_soft_rescale_clip
+    if cfg.prune_disable_keep_bins:
+        pruner.keep_bins = None
     if cfg.prune_disable:
         pruner.set_disabled(True)
+    # Enable Straight-Through Top-K gating during training
+    pruner.set_train_use_st_topk(cfg.prune_train_use_st_topk)
+    pruner.set_train_gumbel_tau(cfg.prune_train_gumbel_tau_start)
     
     if distributed_state.is_main_process:
         print(f"🔧 Pruning Configuration:")
@@ -868,6 +928,13 @@ def finetune(cfg: FinetuneConfig) -> None:
         print(f"  - Rescale Clip: {cfg.prune_soft_rescale_clip}")
         print(f"  - Coverage Warmup: {cfg.prune_coverage_warmup}")
         print(f"  - Coverage Target: {cfg.prune_coverage_target}")
+        print(f"  - Coverage Ramp Steps: {cfg.prune_coverage_ramp_steps}")
+        print(f"  - Coverage Follow MinKeep: {cfg.prune_coverage_follow_min_keep} (+{cfg.prune_coverage_offset})")
+        print(f"  - MinKeep Ratio (warmup -> target): {cfg.prune_min_keep_ratio_warmup} -> {cfg.prune_min_keep_ratio_target}")
+        print(f"  - MinKeep Ramp Steps: {cfg.prune_min_keep_ramp_steps}")
+        print(f"  - Disable Keep Bins: {cfg.prune_disable_keep_bins}")
+        print(f"  - Train ST-TopK: {cfg.prune_train_use_st_topk}")
+        print(f"  - Train Gumbel Tau: start={cfg.prune_train_gumbel_tau_start}, end={cfg.prune_train_gumbel_tau_end}, ramp={cfg.prune_train_gumbel_tau_ramp_steps}")
 
     # LoRA setup
     if cfg.use_lora:
@@ -879,6 +946,19 @@ def finetune(cfg: FinetuneConfig) -> None:
             init_lora_weights="gaussian",
         )
         vla = get_peft_model(vla, lora_config)
+        # Freeze LoRA adapters on first-layer Q/K to keep pruning scores stable
+        freeze_keywords = (
+            "language_model.model.layers.0.self_attn.q_proj",
+            "language_model.model.layers.0.self_attn.k_proj",
+        )
+        frozen_params = 0
+        for name, param in vla.named_parameters():
+            # Only freeze LoRA adapter params on the specified modules
+            if any(k in name for k in freeze_keywords) and ("lora_" in name):
+                param.requires_grad_(False)
+                frozen_params += 1
+        if frozen_params > 0 and PartialState().is_main_process:
+            print(f"🔒 Froze {frozen_params} LoRA parameters on first-layer Q/K to stabilize pruning.")
         for name, param in vla.named_parameters():
             if 'pruner' in name:
                 print(f'Unfreezing {name} parameters')
@@ -914,6 +994,9 @@ def finetune(cfg: FinetuneConfig) -> None:
             device_id,
             {"llm_dim": vla.module.llm_dim, "proprio_dim": PROPRIO_DIM},
         )
+        # If not resuming, try to initialize from base checkpoint if available
+        if not cfg.resume:
+            _maybe_load_component_from_base(proprio_projector, cfg.vla_path, "proprio_projector")
 
     # If applicable, instantiate continuous action head for L1 regression
     if cfg.use_l1_regression:
@@ -925,6 +1008,9 @@ def finetune(cfg: FinetuneConfig) -> None:
             {"input_dim": vla.module.llm_dim, "hidden_dim": vla.module.llm_dim, "action_dim": ACTION_DIM},
             to_bf16=True,
         )
+        # If not resuming, try to initialize from base checkpoint if available
+        if not cfg.resume:
+            _maybe_load_component_from_base(action_head, cfg.vla_path, "action_head")
 
     # If applicable, instantiate diffusion action head and noisy action projector
     if cfg.use_diffusion:
@@ -944,6 +1030,9 @@ def finetune(cfg: FinetuneConfig) -> None:
         noisy_action_projector = init_module(
             NoisyActionProjector, "noisy_action_projector", cfg, device_id, {"llm_dim": vla.module.llm_dim}
         )
+        if not cfg.resume:
+            _maybe_load_component_from_base(action_head, cfg.vla_path, "action_head")
+            _maybe_load_component_from_base(noisy_action_projector, cfg.vla_path, "noisy_action_projector")
 
     # Get number of vision patches
     NUM_PATCHES = vla.module.get_num_patches()
@@ -1071,12 +1160,36 @@ def finetune(cfg: FinetuneConfig) -> None:
         # Set noise scale (decreases over training)
         vla.module.language_model.model.pruner.set_noise_scale(1 - log_step / cfg.max_steps)
         
-        # Dynamically adjust coverage target: use full coverage during warmup, then switch to target
+        # Dynamically schedule pruning
+        pruner = vla.module.language_model.model.pruner
+        # 1) Min-keep: ensure a floor on kept patches that decays gradually（主旋钮）
+        if log_step < cfg.lr_warmup_steps:
+            min_keep_ratio = cfg.prune_min_keep_ratio_warmup
+        else:
+            mk_p = min(1.0, (log_step - cfg.lr_warmup_steps) / max(1, cfg.prune_min_keep_ramp_steps))
+            min_keep_ratio = (1.0 - mk_p) * cfg.prune_min_keep_ratio_warmup + mk_p * cfg.prune_min_keep_ratio_target
+        pruner.min_keep = max(1, int(NUM_PATCHES * float(min_keep_ratio)))
+
+        # 2) Coverage: 跟随 min_keep_ratio 或使用独立的线性调度（副旋钮）
         if log_step < cfg.lr_warmup_steps:
             current_coverage = cfg.prune_coverage_warmup
         else:
-            current_coverage = cfg.prune_coverage_target
-        vla.module.language_model.model.pruner.set_coverage_target(current_coverage)
+            if cfg.prune_coverage_follow_min_keep:
+                # 覆盖率略高于最小保留比例，提供一定弹性
+                current_coverage = min(0.999, float(min_keep_ratio) + float(cfg.prune_coverage_offset))
+            else:
+                cov_p = min(1.0, (log_step - cfg.lr_warmup_steps) / max(1, cfg.prune_coverage_ramp_steps))
+                current_coverage = (1.0 - cov_p) * cfg.prune_coverage_warmup + cov_p * cfg.prune_coverage_target
+        pruner.set_coverage_target(current_coverage)
+
+        # 3) Anneal Gumbel-Softmax temperature for ST-TopK training
+        if cfg.prune_train_use_st_topk:
+            if log_step < cfg.lr_warmup_steps:
+                tau = cfg.prune_train_gumbel_tau_start
+            else:
+                tau_p = min(1.0, (log_step - cfg.lr_warmup_steps) / max(1, cfg.prune_train_gumbel_tau_ramp_steps))
+                tau = (1.0 - tau_p) * cfg.prune_train_gumbel_tau_start + tau_p * cfg.prune_train_gumbel_tau_end
+            pruner.set_train_gumbel_tau(tau)
 
         # Compute training metrics and loss
         compute_diffusion_l1 = cfg.use_diffusion and batch_idx % cfg.diffusion_sample_freq == 0
@@ -1151,6 +1264,13 @@ def finetune(cfg: FinetuneConfig) -> None:
             writer.add_scalar("VLA Train/Learning Rate", scheduler.get_last_lr()[0], log_step)
             # Log the coverage target
             writer.add_scalar("VLA Train/Coverage Target", current_coverage, log_step)
+            try:
+                writer.add_scalar("VLA Train/Prune MinKeep", pruner.min_keep, log_step)
+            except Exception:
+                pass
+            # Log current Gumbel tau if using ST-TopK
+            if cfg.prune_train_use_st_topk:
+                writer.add_scalar("VLA Train/Gumbel Tau", tau, log_step)
 
         # Optimizer and LR scheduler step
         if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
@@ -1159,21 +1279,28 @@ def finetune(cfg: FinetuneConfig) -> None:
             optimizer.zero_grad()
 
         # Save model checkpoint: either keep latest checkpoint only or all checkpoints
-        if distributed_state.is_main_process and gradient_step_idx > 0 and log_step % cfg.save_freq == 0:
-            save_training_checkpoint(
-                cfg=cfg,
-                run_dir=run_dir,
-                log_step=log_step,
-                vla=vla,
-                processor=processor,
-                proprio_projector=proprio_projector if cfg.use_proprio else None,
-                noisy_action_projector=noisy_action_projector if cfg.use_diffusion else None,
-                action_head=action_head if (cfg.use_l1_regression or cfg.use_diffusion) else None,
-                train_dataset=train_dataset,
-            )
-
-        if dist.is_available() and dist.is_initialized():
-            dist.barrier()
+        # Step 1: 先同步所有进程，确保都到达这个点
+        if gradient_step_idx > 0 and log_step % cfg.save_freq == 0:
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
+            
+            # Step 2: 只让主进程保存
+            if distributed_state.is_main_process:
+                save_training_checkpoint(
+                    cfg=cfg,
+                    run_dir=run_dir,
+                    log_step=log_step,
+                    vla=vla,
+                    processor=processor,
+                    proprio_projector=proprio_projector if cfg.use_proprio else None,
+                    noisy_action_projector=noisy_action_projector if cfg.use_diffusion else None,
+                    action_head=action_head if (cfg.use_l1_regression or cfg.use_diffusion) else None,
+                    train_dataset=train_dataset,
+                )
+            
+            # Step 3: 保存完成后，再次同步，确保其他进程等待主进程完成
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
 
         # Test model on validation set
         if cfg.use_val_set and log_step > 0 and log_step % cfg.val_freq == 0:
@@ -1197,7 +1324,14 @@ def finetune(cfg: FinetuneConfig) -> None:
 
         # Stop training when max_steps is reached
         if log_step == cfg.max_steps:
-            print(f"Max step {cfg.max_steps} reached! Stopping training...")
+            # 只让主进程打印停止消息，避免重复
+            if distributed_state.is_main_process:
+                print(f"Max step {cfg.max_steps} reached! Stopping training...")
+            
+            # 同步所有进程，确保一起退出
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
+            
             break
 
 

@@ -133,6 +133,15 @@ class GenerateConfig:
 
     seed: int = 7                                    # Random Seed (for reproducibility)
 
+    # Pruning controls (optional overrides during eval)
+    prune_disable: bool = False                      # Disable pruning/gating during evaluation
+    prune_coverage_target: Optional[float] = None    # Override target coverage during evaluation (None = infer)
+    prune_disable_keep_bins: bool = True             # Disable keep_bins quantization by default
+    prune_min_keep_ratio: Optional[float] = None     # If set, enforce a minimum keep as ratio of num_patches
+    prune_min_keep_abs: Optional[int] = None         # If set, enforce a minimum keep as absolute count
+    prune_coverage_follow_min_keep: bool = True      # If True and ratio set, set coverage ~= ratio + offset
+    prune_coverage_offset: float = 0.05              # Coverage offset above min_keep_ratio
+
     # fmt: on
 
 
@@ -219,6 +228,35 @@ def get_model(cfg, device) -> torch.nn.Module:
 
     # Set number of images in model input
     vla.set_num_images_in_input(cfg.num_images_in_input)
+
+    # Optional: configure pruning for evaluation
+    try:
+        pruner = vla.language_model.model.pruner
+        if cfg.prune_disable:
+            pruner.set_disabled(True)
+        # Keep-bins control
+        if cfg.prune_disable_keep_bins:
+            pruner.keep_bins = None
+        # Min-keep control (ratio has priority over abs if both set)
+        applied_ratio = None
+        if (cfg.prune_min_keep_ratio is not None) or (cfg.prune_min_keep_abs is not None):
+            try:
+                num_patches = vla.get_num_patches()
+            except Exception:
+                num_patches = pruner.num_patches
+            if cfg.prune_min_keep_ratio is not None:
+                applied_ratio = float(cfg.prune_min_keep_ratio)
+                pruner.min_keep = max(1, int(applied_ratio * int(num_patches)))
+            elif cfg.prune_min_keep_abs is not None:
+                pruner.min_keep = int(cfg.prune_min_keep_abs)
+        # Coverage control: explicit target or derive from min_keep_ratio
+        if cfg.prune_coverage_target is not None:
+            pruner.set_coverage_target(cfg.prune_coverage_target)
+        elif cfg.prune_coverage_follow_min_keep and (applied_ratio is not None):
+            derived_cov = min(0.999, applied_ratio + float(cfg.prune_coverage_offset))
+            pruner.set_coverage_target(derived_cov)
+    except Exception:
+        pass
 
     vla.eval()
 

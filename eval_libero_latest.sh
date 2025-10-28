@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# 评测 Step 2000 Checkpoint (最新版本 20:05)
+# 评测 Step 50 Checkpoint (最新训练)
 
 set -e
 
 echo "============================================"
-echo "🎮 评测 Step 2000 Checkpoint"
+echo "🎮 评测 Step 50 Checkpoint"
 echo "============================================"
 echo ""
 
@@ -19,9 +19,8 @@ export MUJOCO_GL=osmesa
 export PYOPENGL_PLATFORM=osmesa
 echo "✅ 使用 OSMesa 软件渲染"
 
-# Checkpoint 路径（使用最新的 20:05 版本）
-CHECKPOINT_PATH="/root/workspace/LightVLA/logs/libero_spatial_training/libero_spatial_20251026_172850/openvla-libero-spatial+libero_spatial_no_noops+b16+lr-0.0001+lora-r8+dropout-0.02025-10-26 20:05:24.231770--2000_chkpt"
-
+# Checkpoint 路径（使用最新训练的 Step 50）
+CHECKPOINT_PATH="/root/workspace/LightVLA/logs/libero_spatial_training/libero_spatial_20251027_093955/openvla-libero-spatial+libero_spatial_no_noops+b16+lr-0.0001+lora-r8+dropout-0.02025-10-27 09:40:23.659495--50_chkpt"
 # 验证checkpoint存在
 if [ ! -d "${CHECKPOINT_PATH}" ]; then
     echo "❌ 错误: Checkpoint 不存在: ${CHECKPOINT_PATH}"
@@ -39,7 +38,7 @@ LORA_RANK=8              # LoRA rank
 # 注意：Coverage将使用checkpoint中保存的config.json配置（prune_target_coverage=0.95）
 
 # 输出目录
-OUTPUT_DIR="/root/workspace/LightVLA/logs/libero_spatial_training/libero_spatial_20251026_172850/eval_logs"
+OUTPUT_DIR="/root/workspace/LightVLA/logs/libero_spatial_training/libero_spatial_20251027_085014/eval_logs"
 mkdir -p "${OUTPUT_DIR}"
 
 echo "⚙️  评测配置："
@@ -71,10 +70,10 @@ python -u experiments/robot/libero/run_libero_eval.py \
     --lora_rank ${LORA_RANK} \
     --center_crop False \
     --num_trials_per_task ${NUM_TRIALS} \
-    --run_id_note "step_2000_eval" \
+    --run_id_note "step_50_eval" \
     --local_log_dir "${OUTPUT_DIR}" \
     --save_rollout_video False \
-    --seed 7 2>&1 | tee "${OUTPUT_DIR}/eval_step2000_$(date +%Y%m%d_%H%M%S).log"
+    --seed 7 2>&1 | tee "${OUTPUT_DIR}/eval_step50_$(date +%Y%m%d_%H%M%S).log"
 
 EVAL_EXIT_CODE=$?
 
@@ -91,7 +90,7 @@ echo ""
 # 显示结果摘要
 echo "📊 结果摘要："
 echo "============================================"
-LATEST_LOG=$(ls -t "${OUTPUT_DIR}"/eval_step2000_*.log 2>/dev/null | head -1)
+LATEST_LOG=$(ls -t "${OUTPUT_DIR}"/eval_step50_*.log 2>/dev/null | head -1)
 if [ -f "${LATEST_LOG}" ]; then
     echo "最新日志: ${LATEST_LOG}"
     echo ""

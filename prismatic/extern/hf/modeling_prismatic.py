@@ -92,6 +92,13 @@ class TokenPruner(nn.Module):
         )
         self.soft_rescale_clip = getattr(config, "prune_soft_rescale_clip", None)
 
+        # Training-time gating behavior (default: soft gating). When enabled, uses
+        # Straight-Through Top-K (Gumbel-Softmax + STE) during training to better
+        # match evaluation-time hard pruning behavior while keeping gradients.
+        self.train_use_st_topk: bool = getattr(config, "prune_train_use_st_topk", False)
+        self.train_gumbel_tau: float = getattr(config, "prune_train_gumbel_tau", 1.0)
+        self.train_gumbel_tau_min: Optional[float] = getattr(config, "prune_train_gumbel_tau_min", None)
+
     def set_noise_scale(self, noise_scale):
         self.noise_scale = noise_scale
     
@@ -102,6 +109,12 @@ class TokenPruner(nn.Module):
     def set_disabled(self, disabled: bool):
         """Enable/disable pruning and gating entirely (keep all tokens as-is)."""
         self.disabled = bool(disabled)
+
+    def set_train_use_st_topk(self, use_st_topk: bool):
+        self.train_use_st_topk = bool(use_st_topk)
+
+    def set_train_gumbel_tau(self, tau: float):
+        self.train_gumbel_tau = float(tau)
 
     def rms_norm(self, hidden_states, eps=1e-6):
         input_dtype = hidden_states.dtype
@@ -269,26 +282,70 @@ class TokenPruner(nn.Module):
         )
 
         if self.training:
-            # Soft gating during training (no hard pruning)
-            weights = torch.softmax(
-                score / max(self.coverage_temperature, self._coverage_eps), dim=-1
-            )
-            if self.soft_rescale_mean_preserve:
-                # Mean-preserving rescale: E[weights] ~ 1 so average token scale is unchanged.
-                weights = weights * patches.shape[1]
-                if self.soft_rescale_clip is not None:
-                    # Optional safety: cap very large scales if distribution is extremely peaked
-                    weights = torch.clamp(weights, max=float(self.soft_rescale_clip))
-            patches = patches * weights.unsqueeze(-1)
+            if self.train_use_st_topk:
+                # === Straight-Through Top-K Gating (Gumbel-Softmax + STE) ===
+                # 1) Compute keep counts (respect coverage_target, min/max_keep, bins)
+                keep_counts, sorted_indices = self._budgeted_keep_counts(score)
 
-            # Optionally compute and stash keep-counts for logging/monitoring
-            if self.debug:
-                keep_counts, _ = self._budgeted_keep_counts(score)
-                self._last_keep_counts = keep_counts.detach().to("cpu")
-            tokens = torch.cat([cls_token, patches, task], dim=1)
-            position_ids = torch.cat([cls_token_id, patches_id, task_id], dim=1)
-            if attention_mask is not None:
-                attention_mask = torch.cat([cls_token_mask, patches_mask, task_mask], dim=1)
+                # 2) Sample Gumbel noise and compute soft probabilities
+                #    logits shape: (B, P)
+                gumbel = -torch.log(-torch.log(torch.rand_like(score).clamp(min=1e-6, max=1.0 - 1e-6)))
+                tau = float(self.train_gumbel_tau if self.train_gumbel_tau is not None else 1.0)
+                tau = max(tau, self._coverage_eps)
+                logits = (score + gumbel) / tau
+                probs = torch.softmax(logits, dim=-1)
+
+                # 3) Build hard Top-K mask per example
+                bsz, num_patches = score.shape
+                m_hard = torch.zeros_like(score)
+                for b in range(bsz):
+                    k = int(keep_counts[b].item())
+                    topk_idx = sorted_indices[b, :k]
+                    m_hard[b, topk_idx] = 1.0
+
+                # 4) Straight-through estimator: forward uses hard mask; backward uses soft probs
+                m = m_hard + probs - probs.detach()
+
+                # 5) Optional mean-preserving rescale so average token scale remains ~1
+                if self.soft_rescale_mean_preserve:
+                    # scale per batch: num_patches / k
+                    scale = (torch.ones_like(keep_counts, dtype=patches.dtype) * num_patches) / keep_counts.clamp(min=1).to(patches.dtype)
+                    scale = scale.view(-1, 1)  # (B, 1)
+                    if self.soft_rescale_clip is not None:
+                        scale = torch.clamp(scale, max=float(self.soft_rescale_clip))
+                    patches = patches * (m.unsqueeze(-1)) * scale.unsqueeze(-1)
+                else:
+                    patches = patches * (m.unsqueeze(-1))
+
+                # Log keep counts for monitoring
+                if self.debug:
+                    self._last_keep_counts = keep_counts.detach().to("cpu")
+
+                tokens = torch.cat([cls_token, patches, task], dim=1)
+                position_ids = torch.cat([cls_token_id, patches_id, task_id], dim=1)
+                if attention_mask is not None:
+                    attention_mask = torch.cat([cls_token_mask, patches_mask, task_mask], dim=1)
+            else:
+                # === Default: Soft gating during training (no hard pruning) ===
+                weights = torch.softmax(
+                    score / max(self.coverage_temperature, self._coverage_eps), dim=-1
+                )
+                if self.soft_rescale_mean_preserve:
+                    # Mean-preserving rescale: E[weights] ~ 1 so average token scale is unchanged.
+                    weights = weights * patches.shape[1]
+                    if self.soft_rescale_clip is not None:
+                        # Optional safety: cap very large scales if distribution is extremely peaked
+                        weights = torch.clamp(weights, max=float(self.soft_rescale_clip))
+                patches = patches * weights.unsqueeze(-1)
+
+                # Optionally compute and stash keep-counts for logging/monitoring
+                if self.debug:
+                    keep_counts, _ = self._budgeted_keep_counts(score)
+                    self._last_keep_counts = keep_counts.detach().to("cpu")
+                tokens = torch.cat([cls_token, patches, task], dim=1)
+                position_ids = torch.cat([cls_token_id, patches_id, task_id], dim=1)
+                if attention_mask is not None:
+                    attention_mask = torch.cat([cls_token_mask, patches_mask, task_mask], dim=1)
 
         else:
             mask = self.score_to_mask(score)
